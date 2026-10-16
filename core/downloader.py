@@ -7,6 +7,7 @@ from datetime import date
 from .imap_client import ImapConnection, ImapError, is_connection_error
 from . import msgfile
 from .storage import MailboxArchive
+from .i18n import tr
 
 MAX_AUTO_RECONNECTS = 3
 
@@ -65,15 +66,15 @@ class Downloader:
     def _reconnect(self) -> bool:
         for attempt in range(1, MAX_AUTO_RECONNECTS + 1):
             self._check_stop()
-            self.cb.log(f"Переподключение (попытка {attempt}/{MAX_AUTO_RECONNECTS})…")
+            self.cb.log(tr('Переподключение (попытка {attempt}/{MAX_AUTO_RECONNECTS})…').format(attempt=attempt, MAX_AUTO_RECONNECTS=MAX_AUTO_RECONNECTS))
             try:
                 self._connect()
                 if self.current_folder:
                     self.conn.select(self.current_folder)
-                self.cb.log("Соединение восстановлено")
+                self.cb.log(tr('Соединение восстановлено'))
                 return True
             except Exception as e:
-                self.cb.log(f"Не удалось переподключиться: {e}")
+                self.cb.log(tr('Не удалось переподключиться: {e}').format(e=e))
                 if self.stop.wait(min(5 * attempt, 15)):
                     raise StopRequested()
         return False
@@ -84,7 +85,7 @@ class Downloader:
         except Exception as e:
             if not is_connection_error(e):
                 raise
-            self.cb.log(f"Обрыв соединения: {e}")
+            self.cb.log(tr('Обрыв соединения: {e}').format(e=e))
             if not self._reconnect():
                 raise
             return fn()
@@ -103,22 +104,20 @@ class Downloader:
     def run(self):
         acquired = False
         try:
-            self.cb.status("В очереди")
+            self.cb.status(tr('В очереди'))
             while not self.sem.acquire(timeout=0.3):
                 self._check_stop()
             acquired = True
             self._run()
             if self.errors:
-                self.cb.finished("warn", f"Завершено с ошибками: загружено {self.downloaded}, "
-                                         f"пропущено из-за ошибок {self.errors}")
+                self.cb.finished("warn", tr('Завершено с ошибками: загружено {0}, пропущено из-за ошибок {1}').format(self.downloaded, self.errors))
             else:
-                self.cb.finished("ok", f"Готово: загружено {self.downloaded}, "
-                                       f"уже было в архиве {self.already}")
+                self.cb.finished("ok", tr('Готово: загружено {0}, уже было в архиве {1}').format(self.downloaded, self.already))
         except StopRequested:
-            self.cb.finished("stopped", "Остановлено пользователем")
+            self.cb.finished("stopped", tr('Остановлено пользователем'))
         except Exception as e:
-            self.cb.log("Критическая ошибка:\n" + traceback.format_exc())
-            self.cb.finished("error", f"Ошибка: {e}")
+            self.cb.log(tr('Критическая ошибка:\n') + traceback.format_exc())
+            self.cb.finished("error", tr('Ошибка: {e}').format(e=e))
         finally:
             if self.conn:
                 self.conn.logout()
@@ -127,22 +126,22 @@ class Downloader:
 
     def _run(self):
         a = self.acc
-        self.cb.status("Подключение")
-        self.cb.log(f"Подключение к {a.host}:{a.port} ({a.security_text()})")
+        self.cb.status(tr('Подключение'))
+        self.cb.log(tr('Подключение к {0}:{1} ({2})').format(a.host, a.port, a.security_text()))
         self._connect()
-        self.cb.log("Вход выполнен")
+        self.cb.log(tr('Вход выполнен'))
 
         folders = [f for f in self.conn.list_folders() if f.selectable]
         if a.folder_mode == "one":
             folders = [f for f in folders if f.raw == a.folder_raw]
             if not folders:
-                raise ImapError(f"Папка «{a.folder_display or a.folder_raw}» не найдена на сервере")
+                raise ImapError(tr('Папка «{0}» не найдена на сервере').format(a.folder_display or a.folder_raw))
 
         dfrom = _d(a.date_from) if a.date_mode == "range" else None
         dto = _d(a.date_to) if a.date_mode == "range" else None
 
         # 1. Анализ: сколько писем и какие ещё не скачаны
-        self.cb.status("Анализ папок")
+        self.cb.status(tr('Анализ папок'))
         plan = []
         for f in folders:
             self._check_stop()
@@ -158,13 +157,13 @@ class Downloader:
             except Exception as e:
                 self.errors += 1
                 self._counters()
-                self.cb.log(f"Папка «{f.display}» пропущена: {e}")
+                self.cb.log(tr('Папка «{0}» пропущена: {e}').format(f.display, e=e))
                 continue
             fdir = self.archive.folder_dir(f)
             have = msgfile.existing_keys(fdir)
             todo = [u for u in uids if MailboxArchive.message_key(uv, u) not in have]
             self.already += len(uids) - len(todo)
-            self.cb.log(f"«{f.display}»: писем {len(uids)}, новых {len(todo)}")
+            self.cb.log(tr('«{0}»: писем {1}, новых {2}').format(f.display, len(uids), len(todo)))
             if todo:
                 plan.append((f, uv, fdir, todo))
         self._counters()
@@ -175,7 +174,7 @@ class Downloader:
         self.cb.progress(0, total)
         for f, uv, fdir, todo in plan:
             self._check_stop()
-            self.cb.status(f"Загрузка: {f.display}")
+            self.cb.status(tr('Загрузка: {0}').format(f.display))
 
             def open_folder(f=f):
                 self.current_folder = f
@@ -187,13 +186,12 @@ class Downloader:
             except Exception as e:
                 self.errors += 1
                 self._counters()
-                self.cb.log(f"Папка «{f.display}» пропущена: {e}")
+                self.cb.log(tr('Папка «{0}» пропущена: {e}').format(f.display, e=e))
                 done += len(todo)
                 self.cb.progress(done, total)
                 continue
             if cur_uv != uv:
-                self.cb.log(f"«{f.display}»: сервер сменил UIDVALIDITY, папка будет "
-                            f"перекачана при следующем запуске")
+                self.cb.log(tr('«{0}»: сервер сменил UIDVALIDITY, папка будет перекачана при следующем запуске').format(f.display))
                 done += len(todo)
                 self.cb.progress(done, total)
                 continue
@@ -219,7 +217,7 @@ class Downloader:
                 conn_err = is_connection_error(e)
                 if conn_err and auto < MAX_AUTO_RECONNECTS:
                     auto += 1
-                    self.cb.log(f"UID {uid}: обрыв соединения ({e})")
+                    self.cb.log(tr('UID {uid}: обрыв соединения ({e})').format(uid=uid, e=e))
                     if self._reconnect():
                         continue
                 if self.skip_all:
@@ -237,5 +235,5 @@ class Downloader:
                     self.skip_all = True
                 self.errors += 1
                 self._counters()
-                self.cb.log(f"Письмо UID {uid} в «{folder.display}» пропущено: {e}")
+                self.cb.log(tr('Письмо UID {uid} в «{0}» пропущено: {e}').format(folder.display, uid=uid, e=e))
                 return

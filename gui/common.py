@@ -1,4 +1,5 @@
 """Фоновые задачи для интерфейса."""
+from core.i18n import num
 from PySide6.QtCore import QThread, Signal
 
 _alive = set()   # держим ссылки на работающие потоки, чтобы их не удалил GC
@@ -32,7 +33,7 @@ def run_bg(fn, on_done, on_fail):
 # ---------- форматирование прогресса ----------
 def fmt_num(n: int) -> str:
     """1234567 -> «1 234 567» (неразрывные пробелы)."""
-    return f"{n:,}".replace(",", " ")
+    return num(n)
 
 
 def percent(done: int, total: int) -> int:

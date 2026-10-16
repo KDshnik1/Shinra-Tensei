@@ -9,6 +9,7 @@ from email.parser import BytesParser
 from pathlib import Path
 
 from . import msgfile
+from .i18n import tr
 
 _FALLBACK = ("utf-8", "cp1251", "koi8-r")
 
@@ -88,7 +89,7 @@ def iter_parts(msg):
                 inner = inner[0] if isinstance(inner, list) and inner else inner
                 subj = decode_hdr(inner.get("Subject")) if hasattr(inner, "get") else ""
                 safe = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in subj)
-                fname = (safe.strip(" .")[:80] or "Пересланное письмо") + ".eml"
+                fname = (safe.strip(" .")[:80] or tr('Пересланное письмо')) + ".eml"
             yield part, ctype, disp, fname, cid, "attachment"
             continue
         if disp != "attachment" and not fname:

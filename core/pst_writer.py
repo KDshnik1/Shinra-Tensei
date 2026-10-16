@@ -10,6 +10,7 @@ import struct
 from array import array
 import uuid
 import zlib
+from .i18n import tr
 
 # ---------------------------------------------------------------- константы NDB
 BLOCK_MAX = 8176            # максимум данных в блоке
@@ -249,7 +250,7 @@ def _encode(ptype: int, value) -> bytes:
         return struct.pack("<H", int(value) & 0xFFFF)
     if ptype == PT_BOOL:
         return b"\x01" if value else b"\x00"
-    raise ValueError(f"тип свойства 0x{ptype:04X} не поддерживается")
+    raise ValueError(tr('тип свойства 0x{ptype:04X} не поддерживается').format(ptype=ptype))
 
 
 def build_pc(props: dict) -> Node:
@@ -410,7 +411,7 @@ class PstFile:
         self._add_folder_rec(NID_ROOT_FOLDER, NID_ROOT_FOLDER, "", None)
         self._add_folder_rec(NID_IPM_SUBTREE, NID_ROOT_FOLDER, "Top of Personal Folders", None)
         self._add_folder_rec(NID_SEARCH_ROOT, NID_ROOT_FOLDER, "Search Root", None)
-        self._add_folder_rec(NID_DELETED_ITEMS, NID_IPM_SUBTREE, "Удаленные", "IPF.Note")
+        self._add_folder_rec(NID_DELETED_ITEMS, NID_IPM_SUBTREE, tr('Удаленные'), "IPF.Note")
 
     # ---------- размер ----------
     def size(self) -> int:
@@ -458,7 +459,7 @@ class PstFile:
         if len(xs) == 1:
             return xs[0][0]
         if len(xs) > 1021:
-            raise ValueError("слишком большой объект для PST")
+            raise ValueError(tr('слишком большой объект для PST'))
         data = struct.pack("<BBHI", 1, 2, len(xs), sum(s for _, s in xs)) + b"".join(
             struct.pack("<Q", b) for b, _ in xs)
         return self._write_block(data, True)

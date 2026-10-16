@@ -6,6 +6,8 @@ import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date
 from pathlib import Path
+from . import i18n
+from .i18n import DATE_FMT, tr
 
 APP_NAME = "Shinra Tensei"
 OLD_APP_NAME = "MailArchiver"
@@ -13,7 +15,7 @@ OLD_APP_NAME = "MailArchiver"
 SECURITY_OPTIONS = [
     ("SSL/TLS (IMAPS)", "ssl", 993),
     ("STARTTLS", "starttls", 143),
-    ("Без шифрования", "none", 143),
+    (tr('Без шифрования'), "none", 143),
 ]
 
 
@@ -89,15 +91,15 @@ class Account:
 
     def period_text(self) -> str:
         if self.date_mode != "range":
-            return "За всё время"
-        f = date.fromisoformat(self.date_from).strftime("%d.%m.%Y") if self.date_from else "…"
-        t = date.fromisoformat(self.date_to).strftime("%d.%m.%Y") if self.date_to else "…"
+            return tr('За всё время')
+        f = date.fromisoformat(self.date_from).strftime(DATE_FMT) if self.date_from else "…"
+        t = date.fromisoformat(self.date_to).strftime(DATE_FMT) if self.date_to else "…"
         return f"{f} – {t}"
 
     def folder_text(self) -> str:
         if self.folder_mode == "one":
             return self.folder_display or self.folder_raw
-        return "Все папки"
+        return tr('Все папки')
 
     def security_text(self) -> str:
         for text, val, _ in SECURITY_OPTIONS:
@@ -134,6 +136,7 @@ class Config:
         self.pst_dir = str(default_pst_dir())
         self.parallel = 3
         self.theme = "system"          # system | light | dark
+        self.language = i18n.LANG      # ru | en (применяется после перезапуска)
         self.split_gb = 10.0           # размер одной части PST, ГБ
 
     def load(self):
@@ -147,6 +150,8 @@ class Config:
         self.pst_dir = data.get("pst_dir", self.pst_dir)
         self.parallel = int(data.get("parallel", self.parallel))
         self.theme = data.get("theme", self.theme)
+        if data.get("language") in dict(i18n.LANGUAGES):
+            self.language = data["language"]
         try:
             self.split_gb = float(data.get("split_gb", self.split_gb))
         except (TypeError, ValueError):
@@ -170,6 +175,7 @@ class Config:
             "pst_dir": self.pst_dir,
             "parallel": self.parallel,
             "theme": self.theme,
+            "language": self.language,
             "split_gb": self.split_gb,
             "accounts": accs,
         }

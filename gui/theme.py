@@ -7,8 +7,9 @@ from string import Template
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QPalette
+from core.i18n import tr
 
-THEME_MODES = [("Системная", "system"), ("Светлая", "light"), ("Тёмная", "dark")]
+THEME_MODES = [(tr('Системная'), "system"), (tr('Светлая'), "light"), (tr('Тёмная'), "dark")]
 
 COLORS = {
     "light": dict(

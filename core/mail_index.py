@@ -6,6 +6,7 @@ from pathlib import Path
 from . import msgfile
 from .mailparse import summarize
 from .storage import MailboxArchive
+from .i18n import tr
 
 INDEX_VERSION = 4          # 4: сжатые письма .eml.gz, размер файла отдельно
 
@@ -86,7 +87,7 @@ def load_folder(fdir: Path, folder_display: str, stop=None) -> list[dict]:
                 changed = True
         except Exception as e:
             row = {"file": p.name, "from": "", "from_name": "", "from_addr": "", "to": "",
-                   "cc": "", "subject": f"<не удалось прочитать: {e}>", "msgid": "",
+                   "cc": "", "subject": tr('<не удалось прочитать: {e}>').format(e=e), "msgid": "",
                    "sent": None, "received": 0, "size": 0, "fsize": -1, "mtime": 0,
                    "attach": 0,
                    "att_names": []}

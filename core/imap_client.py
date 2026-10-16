@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from . import imap_utf7
+from .i18n import tr
 
 # Некоторые серверы присылают очень длинные строки — снимаем ограничение imaplib.
 imaplib._MAXLINE = 100_000_000
@@ -112,8 +113,7 @@ def parse_fetch_response(data):
         elif isinstance(part, bytes):
             meta += part + b" "
     if body is None:
-        raise ImapError("Сервер не вернул содержимое письма "
-                        "(письмо удалено, повреждено или недоступно)")
+        raise ImapError(tr('Сервер не вернул содержимое письма (письмо удалено, повреждено или недоступно)'))
     m = re.search(rb"FLAGS \(([^)]*)\)", meta)
     flags = m.group(1).decode("utf-8", "replace") if m else ""
     idate = imaplib.Internaldate2tuple(meta)
@@ -137,12 +137,11 @@ class ImapConnection:
                 if a.security == "starttls":
                     M.starttls(ssl_context=ctx)
         except ssl.SSLCertVerificationError as e:
-            raise ImapError(f"Сертификат сервера не прошёл проверку ({e.verify_message}). "
-                            "Включите «Принимать все сертификаты».") from e
+            raise ImapError(tr('Сертификат сервера не прошёл проверку ({0}). Включите «Принимать все сертификаты».').format(e.verify_message)) from e
         except ssl.SSLError as e:
-            raise ImapError(f"Ошибка SSL/TLS: {e}. Проверьте тип шифрования и порт.") from e
+            raise ImapError(tr('Ошибка SSL/TLS: {e}. Проверьте тип шифрования и порт.').format(e=e)) from e
         except OSError as e:
-            raise ImapError(f"Не удалось подключиться к {a.host}:{a.port} — {e}") from e
+            raise ImapError(tr('Не удалось подключиться к {0}:{1} — {e}').format(a.host, a.port, e=e)) from e
         self.M = M
         self._login()
 
@@ -157,7 +156,7 @@ class ImapConnection:
                 self.M.authenticate("PLAIN", lambda _: f"\0{user}\0{pw}".encode("utf-8"))
         except imaplib.IMAP4.error as e:
             msg = e.args[0].decode() if e.args and isinstance(e.args[0], bytes) else str(e)
-            raise ImapError(f"Ошибка авторизации: {msg}") from e
+            raise ImapError(tr('Ошибка авторизации: {msg}').format(msg=msg)) from e
 
     def logout(self):
         if self.M is not None:
@@ -171,13 +170,13 @@ class ImapConnection:
     def list_folders(self) -> list[Folder]:
         typ, data = self.M.list()
         if typ != "OK":
-            raise ImapError(f"Не удалось получить список папок: {data}")
+            raise ImapError(tr('Не удалось получить список папок: {data}').format(data=data))
         return parse_list_response(data)
 
     def select(self, folder: Folder) -> str:
         typ, data = self.M.select(quote(folder.raw), readonly=True)
         if typ != "OK":
-            raise ImapError(f"Не удалось открыть папку «{folder.display}»: {data}")
+            raise ImapError(tr('Не удалось открыть папку «{0}»: {data}').format(folder.display, data=data))
         _, uv = self.M.response("UIDVALIDITY")
         return uv[0].decode() if uv and uv[0] else "0"
 
@@ -191,7 +190,7 @@ class ImapConnection:
             crit = ["ALL"]
         typ, data = self.M.uid("SEARCH", *crit)
         if typ != "OK":
-            raise ImapError(f"Ошибка поиска писем: {data}")
+            raise ImapError(tr('Ошибка поиска писем: {data}').format(data=data))
         uids = []
         for part in data:
             if part:
@@ -201,5 +200,5 @@ class ImapConnection:
     def fetch(self, uid: str):
         typ, data = self.M.uid("FETCH", uid, "(UID INTERNALDATE FLAGS BODY.PEEK[])")
         if typ != "OK":
-            raise ImapError(f"Сервер отказал в выдаче письма: {data}")
+            raise ImapError(tr('Сервер отказал в выдаче письма: {data}').format(data=data))
         return parse_fetch_response(data)

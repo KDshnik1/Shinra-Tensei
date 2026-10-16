@@ -18,22 +18,23 @@ from core.mail_index import all_mailboxes, load_folder, mailbox_folders
 from core.mailparse import head_text, parse_full, sent_datetime
 from . import icons, theme
 from .common import run_bg
+from core.i18n import DATETIME_FMT, QT_DATE_FMT, tr
 
-COLS = ["", "От", "Кому", "Тема", "Отправлено", "Получено", "Размер", "Папка"]
+COLS = ["", tr('От'), tr('Кому'), tr('Тема'), tr('Отправлено'), tr('Получено'), tr('Размер'), tr('Папка')]
 C_ATT, C_FROM, C_TO, C_SUBJ, C_SENT, C_RECV, C_SIZE, C_FOLDER = range(8)
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 def human_size(n: int) -> str:
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if n < 1024 or unit == "ГБ":
-            return f"{n:.0f} {unit}" if unit == "Б" else f"{n:.1f} {unit}"
+    for unit in (tr('Б'), tr('КБ'), tr('МБ'), tr('ГБ')):
+        if n < 1024 or unit == tr('ГБ'):
+            return f"{n:.0f} {unit}" if unit == tr('Б') else f"{n:.1f} {unit}"
         n /= 1024
     return str(n)
 
 
 def fmt_dt(dt: datetime | None) -> str:
-    return dt.strftime("%d.%m.%Y %H:%M") if dt else ""
+    return dt.strftime(DATETIME_FMT) if dt else ""
 
 
 class MessageModel(QAbstractTableModel):
@@ -66,9 +67,9 @@ class MessageModel(QAbstractTableModel):
                 and section == C_ATT):
             return icons.paperclip(theme.color("text_muted"))
         if orient == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.ToolTipRole:
-            return {C_ATT: "Письма с вложениями (щёлкните, чтобы отсортировать)",
-                    C_SENT: "Дата из письма (когда отправлено)",
-                    C_RECV: "Когда письмо получил почтовый сервер"}.get(section)
+            return {C_ATT: tr('Письма с вложениями (щёлкните, чтобы отсортировать)'),
+                    C_SENT: tr('Дата из письма (когда отправлено)'),
+                    C_RECV: tr('Когда письмо получил почтовый сервер')}.get(section)
         return None
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
@@ -81,7 +82,7 @@ class MessageModel(QAbstractTableModel):
                 C_ATT: str(int(r.get("attach") or 0)) if (r.get("attach") or 0) > 1 else "",
                 C_FROM: r.get("from_name") or r.get("from_addr") or r.get("from", ""),
                 C_TO: r.get("to", ""),
-                C_SUBJ: r.get("subject") or "(без темы)",
+                C_SUBJ: r.get("subject") or tr('(без темы)'),
                 C_SENT: fmt_dt(r["_sent_local"]),
                 C_RECV: fmt_dt(r["_recv_local"]),
                 C_SIZE: human_size(r.get("size", 0)),
@@ -99,8 +100,8 @@ class MessageModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole and c == C_ATT and r.get("attach"):
             names = r.get("att_names") or []
             n = int(r.get("attach") or 0)
-            more = f"\n… и ещё {n - len(names)}" if n > len(names) else ""
-            return f"Вложений: {n}\n" + "\n".join(names) + more
+            more = tr('\n… и ещё {0}').format(n - len(names)) if n > len(names) else ""
+            return tr('Вложений: {n}\n').format(n=n) + "\n".join(names) + more
         if role == Qt.ItemDataRole.ToolTipRole and c in (C_FROM, C_TO, C_SUBJ):
             return {C_FROM: r.get("from"), C_TO: r.get("to"), C_SUBJ: r.get("subject")}[c]
         if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_ATT, C_SIZE):
@@ -157,7 +158,7 @@ class ViewerWindow(QDialog):
     def __init__(self, parent, cfg, select_email=None):
         super().__init__(parent)
         self.cfg = cfg
-        self.setWindowTitle("Просмотр архива писем — Shinra Tensei")
+        self.setWindowTitle(tr('Просмотр архива писем — Shinra Tensei'))
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint |
                             Qt.WindowType.WindowMinimizeButtonHint)
         self.resize(1300, 820)
@@ -176,12 +177,12 @@ class ViewerWindow(QDialog):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         self.tree = QTreeWidget()
-        self.tree.setHeaderLabels(["Ящики и папки", "Писем"])
+        self.tree.setHeaderLabels([tr('Ящики и папки'), tr('Писем')])
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.tree.currentItemChanged.connect(self._tree_changed)
         ll.addWidget(self.tree)
-        b = QPushButton("Обновить")
+        b = QPushButton(tr('Обновить'))
         b.clicked.connect(lambda: self._fill_tree(None))
         ll.addWidget(b)
         split.addWidget(left)
@@ -191,27 +192,27 @@ class ViewerWindow(QDialog):
         tl = QVBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
         fl = QHBoxLayout()
-        self.ed_search = QLineEdit(placeholderText="Поиск: отправитель, получатель, тема…")
+        self.ed_search = QLineEdit(placeholderText=tr('Поиск: отправитель, получатель, тема…'))
         self.ed_search.setClearButtonEnabled(True)
         self.ed_search.textChanged.connect(self._apply_filter)
         fl.addWidget(self.ed_search, 2)
-        self.chk_date = QCheckBox("Дата")
+        self.chk_date = QCheckBox(tr('Дата'))
         self.chk_date.toggled.connect(self._apply_filter)
         self.cb_by = QComboBox()
-        self.cb_by.addItem("получения", "received")
-        self.cb_by.addItem("отправки", "sent")
+        self.cb_by.addItem(tr('получения'), "received")
+        self.cb_by.addItem(tr('отправки'), "sent")
         self.cb_by.currentIndexChanged.connect(self._apply_filter)
-        self.de_from = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
-        self.de_to = QDateEdit(calendarPopup=True, displayFormat="dd.MM.yyyy")
+        self.de_from = QDateEdit(calendarPopup=True, displayFormat=QT_DATE_FMT)
+        self.de_to = QDateEdit(calendarPopup=True, displayFormat=QT_DATE_FMT)
         self.de_from.setDate(QDate.currentDate().addMonths(-1))
         self.de_to.setDate(QDate.currentDate())
         for w in (self.de_from, self.de_to):
             w.dateChanged.connect(self._apply_filter)
         fl.addWidget(self.chk_date)
         fl.addWidget(self.cb_by)
-        fl.addWidget(QLabel("с"))
+        fl.addWidget(QLabel(tr('с')))
         fl.addWidget(self.de_from)
-        fl.addWidget(QLabel("по"))
+        fl.addWidget(QLabel(tr('по')))
         fl.addWidget(self.de_to)
         self.lbl_count = QLabel()
         fl.addWidget(self.lbl_count)
@@ -255,19 +256,19 @@ class ViewerWindow(QDialog):
         self.att_list = QListWidget()
         self.att_list.setFlow(QListWidget.Flow.LeftToRight)
         self.att_list.setMaximumHeight(34)
-        self.att_list.setToolTip("Двойной щелчок — сохранить вложение")
+        self.att_list.setToolTip(tr('Двойной щелчок — сохранить вложение'))
         self.att_list.itemDoubleClicked.connect(self._save_attachment)
         al.addWidget(self.att_list, 1)
-        self.btn_save_all = QPushButton("Сохранить вложения…")
+        self.btn_save_all = QPushButton(tr('Сохранить вложения…'))
         self.btn_save_all.clicked.connect(self._save_all)
         al.addWidget(self.btn_save_all)
-        self.btn_headers = QPushButton("Заголовки")
+        self.btn_headers = QPushButton(tr('Заголовки'))
         self.btn_headers.clicked.connect(self._show_headers)
         al.addWidget(self.btn_headers)
-        self.btn_eml = QPushButton("Сохранить .eml…")
+        self.btn_eml = QPushButton(tr('Сохранить .eml…'))
         self.btn_eml.clicked.connect(self._save_eml)
         al.addWidget(self.btn_eml)
-        self.btn_open = QPushButton("Открыть в почтовой программе")
+        self.btn_open = QPushButton(tr('Открыть в почтовой программе'))
         self.btn_open.clicked.connect(self._open_external)
         al.addWidget(self.btn_open)
         pl.addLayout(al)
@@ -318,7 +319,7 @@ class ViewerWindow(QDialog):
             if prev_key == key:
                 target = target or top
         if not boxes:
-            self.lbl_count.setText("Архив пуст — сначала выполните загрузку почты")
+            self.lbl_count.setText(tr('Архив пуст — сначала выполните загрузку почты'))
             return
         self.tree.setCurrentItem(target or self.tree.topLevelItem(0))
 
@@ -339,7 +340,7 @@ class ViewerWindow(QDialog):
         token = self._load_token
         self.model.set_rows([])
         self._show_message(None)
-        self.lbl_count.setText("Загрузка списка писем…")
+        self.lbl_count.setText(tr('Загрузка списка писем…'))
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
 
         def job():
@@ -360,7 +361,7 @@ class ViewerWindow(QDialog):
 
         def fail(err):
             QApplication.restoreOverrideCursor()
-            self.lbl_count.setText(f"Ошибка: {err}")
+            self.lbl_count.setText(tr('Ошибка: {err}').format(err=err))
         run_bg(job, done, fail)
 
     # ---------- фильтр ----------
@@ -375,7 +376,7 @@ class ViewerWindow(QDialog):
 
     def _update_count(self):
         total, shown = self.model.rowCount(), self.proxy.rowCount()
-        self.lbl_count.setText(f"Писем: {shown}" if shown == total else f"Писем: {shown} из {total}")
+        self.lbl_count.setText(tr('Писем: {shown}').format(shown=shown) if shown == total else tr('Писем: {shown} из {total}').format(shown=shown, total=total))
 
     # ---------- предпросмотр ----------
     def _row_changed(self, cur, _prev=None):
@@ -403,23 +404,23 @@ class ViewerWindow(QDialog):
         def line(label, value):
             return (f"<tr><td style='color:{muted};padding-right:10px'>{label}</td>"
                     f"<td>{html.escape(value)}</td></tr>") if value else ""
-        subj = html.escape(row.get("subject") or "(без темы)")
+        subj = html.escape(row.get("subject") or tr('(без темы)'))
         self.lbl_head.setText(
             f"<div style='font-size:13pt;font-weight:600'>{subj}</div><table>"
-            + line("От:", row.get("from", ""))
-            + line("Кому:", row.get("to", ""))
-            + line("Копия:", row.get("cc", ""))
-            + line("Отправлено:", fmt_dt(row.get("_sent_local")))
-            + line("Получено:", fmt_dt(row.get("_recv_local")))
-            + line("Папка:", f"{row.get('folder', '')}   •   {human_size(row.get('size', 0))}")
-            + line("Вложения:", str(int(row.get("attach") or 0)) if row.get("attach") else "")
+            + line(tr('От:'), row.get("from", ""))
+            + line(tr('Кому:'), row.get("to", ""))
+            + line(tr('Копия:'), row.get("cc", ""))
+            + line(tr('Отправлено:'), fmt_dt(row.get("_sent_local")))
+            + line(tr('Получено:'), fmt_dt(row.get("_recv_local")))
+            + line(tr('Папка:'), f"{row.get('folder', '')}   •   {human_size(row.get('size', 0))}")
+            + line(tr('Вложения:'), str(int(row.get("attach") or 0)) if row.get("attach") else "")
             + "</table>")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             body = parse_full(Path(row["path"]))
         except Exception as e:
             QApplication.restoreOverrideCursor()
-            self.browser.setPlainText(f"Не удалось разобрать письмо: {e}")
+            self.browser.setPlainText(tr('Не удалось разобрать письмо: {e}').format(e=e))
             return
         QApplication.restoreOverrideCursor()
         self._body = body
@@ -450,7 +451,7 @@ class ViewerWindow(QDialog):
     # ---------- действия ----------
     def _save_attachment(self, item):
         a = item.data(Qt.ItemDataRole.UserRole)
-        path, _ = QFileDialog.getSaveFileName(self, "Сохранить вложение",
+        path, _ = QFileDialog.getSaveFileName(self, tr('Сохранить вложение'),
                                               str(Path.home() / "Downloads" / a.name))
         if path:
             Path(path).write_bytes(a.data)
@@ -458,7 +459,7 @@ class ViewerWindow(QDialog):
     def _save_all(self):
         if not self._body:
             return
-        d = QFileDialog.getExistingDirectory(self, "Папка для вложений",
+        d = QFileDialog.getExistingDirectory(self, tr('Папка для вложений'),
                                              str(Path.home() / "Downloads"))
         if not d:
             return
@@ -472,16 +473,16 @@ class ViewerWindow(QDialog):
                 k += 1
             target.write_bytes(a.data)
             n += 1
-        QMessageBox.information(self, "Вложения", f"Сохранено файлов: {n}")
+        QMessageBox.information(self, tr('Вложения'), tr('Сохранено файлов: {n}').format(n=n))
 
     def _save_eml(self):
         if not self._current:
             return
         name = "".join(c if c not in '<>:"/\\|?*' else "_"
-                       for c in (self._current.get("subject") or "письмо"))[:80] + ".eml"
-        path, _ = QFileDialog.getSaveFileName(self, "Сохранить письмо",
+                       for c in (self._current.get("subject") or tr('письмо')))[:80] + ".eml"
+        path, _ = QFileDialog.getSaveFileName(self, tr('Сохранить письмо'),
                                               str(Path.home() / "Downloads" / name),
-                                              "Письмо (*.eml)")
+                                              tr('Письмо (*.eml)'))
         if path:
             Path(path).write_bytes(msgfile.read_message(self._current["path"]))
 
@@ -490,14 +491,14 @@ class ViewerWindow(QDialog):
             try:
                 os.startfile(str(msgfile.plain_copy(self._current["path"])))
             except OSError as e:
-                QMessageBox.warning(self, "Открыть письмо",
-                                    f"Нет программы для открытия .eml: {e}")
+                QMessageBox.warning(self, tr('Открыть письмо'),
+                                    tr('Нет программы для открытия .eml: {e}').format(e=e))
 
     def _show_headers(self):
         if not self._current:
             return
         d = QDialog(self)
-        d.setWindowTitle("Заголовки письма")
+        d.setWindowTitle(tr('Заголовки письма'))
         d.resize(800, 500)
         lay = QVBoxLayout(d)
         t = QTextBrowser()
