@@ -12,12 +12,14 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import mailparse
+from . import mailparse, msgfile
 from .pst_reader import PstCheckError, verify
 from .pst_writer import NID_IPM_SUBTREE, PstFile, filetime
 from .storage import load_flags, safe_name
 
-SPLIT_SIZE = 1_900_000_000          # PST делится на части по ~1,9 ГБ
+GB = 1024 ** 3
+DEFAULT_SPLIT_GB = 10               # размер одной части по умолчанию
+MIN_SPLIT_GB, MAX_SPLIT_GB = 0.5, 50   # 50 ГБ — предел Unicode PST в Outlook
 
 
 class PstExportError(Exception):
@@ -34,6 +36,13 @@ def check_password(pw: str) -> str | None:
     return None
 
 
+def _mtime(p) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def collect_tasks(mailbox_dir: Path):
     meta_path = mailbox_dir / "folders.json"
     if not meta_path.exists():
@@ -42,7 +51,9 @@ def collect_tasks(mailbox_dir: Path):
     tasks = []
     for rel, info in meta.items():
         fdir = mailbox_dir.joinpath(*rel.split("/"))
-        emls = sorted(fdir.glob("*.eml")) if fdir.exists() else []
+        emls = msgfile.list_messages(fdir)
+        # по дате получения: тогда каждая часть PST покрывает непрерывный период
+        emls.sort(key=lambda p: (_mtime(p), msgfile.msg_key(p)))
         tasks.append((info, fdir, emls))
     tasks.sort(key=lambda t: (t[0]["display"].upper() != "INBOX", t[0]["display"].lower()))
     return tasks
@@ -125,32 +136,123 @@ def _pst_folder_name(seg: str, top_level: bool) -> str:
     return seg.strip() or "_"
 
 
+def _fmt_n(n: int) -> str:
+    return f"{n:,}".replace(",", " ")
+
+
+def _fmt_size(n: int) -> str:
+    t = f"{n / GB:.2f} ГБ" if n >= GB else f"{n / 1024 ** 2:.1f} МБ"
+    return t.replace(".", ",")
+
+
+def _fmt_gb(x: float) -> str:
+    return f"{x:g}".replace(".", ",")
+
+
+def _fmt_d(ts) -> str:
+    return datetime.fromtimestamp(ts).strftime("%d.%m.%Y") if ts else "—"
+
+
+def _period(lo, hi) -> str:
+    return f"{_fmt_d(lo)} – {_fmt_d(hi)}" if lo else "—"
+
+
+class _PartStats:
+    def __init__(self, path: Path):
+        self.path = path
+        self.folders = {}           # путь папки в PST -> [писем, мин. дата, макс. дата]
+        self.count = 0
+        self.lo = self.hi = None
+        self.size = 0
+
+    def add(self, folder: str, ts: float):
+        f = self.folders.setdefault(folder, [0, ts, ts])
+        f[0] += 1
+        f[1] = min(f[1], ts)
+        f[2] = max(f[2], ts)
+        self.count += 1
+        self.lo = ts if self.lo is None else min(self.lo, ts)
+        self.hi = ts if self.hi is None else max(self.hi, ts)
+
+
+def write_report(report_path: Path, display_name: str, parts: list, split_bytes: int,
+                 password: bool, errors: int, stopped: bool) -> Path:
+    total = sum(p.count for p in parts)
+    lo = min((p.lo for p in parts if p.lo), default=None)
+    hi = max((p.hi for p in parts if p.hi), default=None)
+    out = ["Отчёт об экспорте в Outlook PST — Shinra Tensei", "=" * 60,
+           f"Почтовый ящик:     {display_name}",
+           f"Дата экспорта:     {datetime.now():%d.%m.%Y %H:%M}",
+           f"Всего писем:       {_fmt_n(total)}",
+           f"Период писем:      {_period(lo, hi)}",
+           f"Файлов PST:        {len(parts)} (размер одной части — до {_fmt_gb(split_bytes / GB)} ГБ)",
+           f"Пароль на PST:     {'установлен' if password else 'нет'}"]
+    if errors:
+        out.append(f"Ошибок:            {errors} (подробности — в журнале экспорта)")
+    if stopped:
+        out.append("ВНИМАНИЕ: экспорт был остановлен, в файлы попали не все письма.")
+    out += ["", "Даты указаны по дате получения письма почтовым сервером.", ""]
+    for i, p in enumerate(parts, 1):
+        out += ["-" * 60,
+                f"Часть {i}: {p.path.name}",
+                f"  Размер файла: {_fmt_size(p.size)}",
+                f"  Писем:        {_fmt_n(p.count)}",
+                f"  Период:       {_period(p.lo, p.hi)}",
+                ""]
+        if not p.folders:
+            out += ["  (писем нет)", ""]
+            continue
+        w = max(16, max(len(f) for f in p.folders) + 2)
+        out.append("  " + "Папка".ljust(w) + "Писем".rjust(10) + "    " + "С" .ljust(12) + "По")
+        for name, (n, a, b) in p.folders.items():
+            out.append("  " + name.ljust(w) + _fmt_n(n).rjust(10) + "    "
+                       + _fmt_d(a).ljust(12) + _fmt_d(b))
+        out.append("")
+    report_path.write_text("\n".join(out) + "\n", encoding="utf-8-sig")
+    return report_path
+
+
 def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
-                   cb, stop_event, password: str = ""):
-    """cb: log(str), progress(done, total). Возвращает (успешно, ошибок, [файлы])."""
+                   cb, stop_event, password: str = "", split_gb: float = DEFAULT_SPLIT_GB):
+    """cb: log(str), progress(done, total), stage(str) — необязательно.
+    Возвращает (успешно, ошибок, [файлы PST], путь к отчёту)."""
     err = check_password(password)
     if err:
         raise PstExportError(err)
+    split_bytes = int(min(max(float(split_gb), MIN_SPLIT_GB), MAX_SPLIT_GB) * GB)
     tasks = collect_tasks(mailbox_dir)
     total = sum(len(t[2]) for t in tasks)
     if not tasks:
         raise PstExportError("В архиве нет писем для этого ящика — сначала выполните загрузку")
     pst_path.parent.mkdir(parents=True, exist_ok=True)
 
+    stage = getattr(cb, "stage", None) or (lambda _t: None)
     files = []
-    part = [0]
-    state = {}
+    parts = []
+    state = {"raw": 0}
 
     def open_part():
-        part[0] += 1
-        path = pst_path if part[0] == 1 else pst_path.with_name(
-            f"{pst_path.stem}_часть{part[0]}{pst_path.suffix}")
-        name = display_name if part[0] == 1 else f"{display_name} ({part[0]})"
+        n = len(files) + 1
+        path = pst_path if n == 1 else pst_path.with_name(
+            f"{pst_path.stem}_часть{n}{pst_path.suffix}")
+        name = display_name if n == 1 else f"{display_name} ({n})"
         state["pst"] = PstFile(path, name, password)
         state["folders"] = {}
+        state["raw"] = 0
+        state["base"] = state["pst"].size()
         files.append(path)
-        if part[0] > 1:
-            cb.log(f"Файл достиг ~1,9 ГБ — начата часть {part[0]}: {path.name}")
+        parts.append(_PartStats(path))
+        if n > 1:
+            cb.log(f"Часть {n - 1} достигла лимита {_fmt_gb(split_bytes / GB)} ГБ — "
+                   f"начата часть {n}: {path.name}")
+
+    def close_part():
+        state["pst"].close()
+        p = parts[-1]
+        p.size = p.path.stat().st_size
+        if p.size > split_bytes:
+            cb.log(f"Часть {len(parts)} ({_fmt_size(p.size)}) больше лимита: в ней есть "
+                   f"письмо крупнее заданного размера части")
 
     def folder_nid(segs):
         cache = state["folders"]
@@ -162,6 +264,15 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
             parent = cache[key]
         return parent
 
+    def needs_new_part(raw_next: int) -> bool:
+        pst = state["pst"]
+        if parts[-1].count == 0:
+            return False
+        grown = pst.size() - state["base"]
+        ratio = max(1.0, grown / state["raw"]) if state["raw"] else 2.5
+        est_next = int(raw_next * ratio * 1.5) + 65536
+        return pst.size() + pst.close_overhead() + est_next > split_bytes
+
     open_part()
     ok = errors = done = 0
     cb.progress(0, total)
@@ -171,38 +282,55 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
                 break
             delim = info.get("delimiter") or ""
             segs = [s for s in (info["display"].split(delim) if delim else [info["display"]]) if s]
+            label = " / ".join(_pst_folder_name(sg, i == 0) for i, sg in enumerate(segs))
             folder_nid(segs)
-            cb.log(f"Папка «{info['display']}»: {len(emls)} писем")
+            cb.log(f"Папка «{info['display']}»: {_fmt_n(len(emls))} писем")
             flags = load_flags(fdir)
             for eml in emls:
                 if stop_event.is_set():
                     break
-                if state["pst"].size() > SPLIT_SIZE:
-                    state["pst"].close()
+                try:
+                    st = eml.stat()
+                    raw = msgfile.raw_size(eml, st)
+                except OSError:
+                    st, raw = None, 0
+                if needs_new_part(raw):
+                    close_part()
                     open_part()
                 try:
-                    read = "\\seen" in flags.get(eml.stem, "").lower()
+                    read = "\\seen" in flags.get(msgfile.msg_key(eml), "").lower()
                     state["pst"].add_message(folder_nid(segs), eml_to_message(eml, read))
+                    state["raw"] += raw
+                    parts[-1].add(label, st.st_mtime if st else 0)
                     ok += 1
                 except Exception as e:
                     errors += 1
                     cb.log(f"Ошибка в письме {eml.name}: {e}")
                 done += 1
                 cb.progress(done, total)
+        stage("Запись структуры PST…")
         cb.log("Запись структуры PST…")
-        state["pst"].close()
+        close_part()
     except BaseException:
         state["pst"].abort()
         raise
 
     for path in files:
+        stage(f"Проверка файла {path.name}…")
         cb.log(f"Проверка файла {path.name}…")
         try:
             summary = verify(path)
             n = sum(v for k, v in summary.items() if not k.startswith("_"))
-            cb.log(f"Проверка пройдена: {n} писем, структура PST корректна"
+            cb.log(f"Проверка пройдена: {_fmt_n(n)} писем, структура PST корректна"
                    + (", установлен пароль" if summary["_password"] else ""))
         except PstCheckError as e:
             errors += 1
             cb.log(f"ВНИМАНИЕ: самопроверка файла {path.name} не пройдена: {e}")
-    return ok, errors, files
+
+    report = write_report(pst_path.with_name(f"{pst_path.stem}_отчёт.txt"), display_name,
+                          parts, split_bytes, bool(password), errors, stop_event.is_set())
+    for i, p in enumerate(parts, 1):
+        cb.log(f"Часть {i}: {p.path.name} — {_fmt_size(p.size)}, {_fmt_n(p.count)} писем, "
+               f"{_period(p.lo, p.hi)}")
+    cb.log(f"Отчёт: {report}")
+    return ok, errors, files, report

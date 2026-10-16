@@ -8,6 +8,8 @@ from email.header import decode_header
 from email.parser import BytesParser
 from pathlib import Path
 
+from . import msgfile
+
 _FALLBACK = ("utf-8", "cp1251", "koi8-r")
 
 
@@ -45,10 +47,71 @@ def decode_hdr(v) -> str:
 
 
 def _read_head(path: Path, limit=512 * 1024) -> bytes:
-    with open(path, "rb") as fh:
+    with msgfile.open_message(path) as fh:
         data = fh.read(limit)
     cuts = [i for i in (data.find(b"\r\n\r\n"), data.find(b"\n\n")) if i >= 0]
     return (data[:min(cuts)] if cuts else data) + b"\r\n\r\n"
+
+
+def _walk(part):
+    """Листовые части письма; вложенное письмо (message/rfc822) — одна часть, без разбора."""
+    if (part.get_content_type() or "").lower() == "message/rfc822":
+        yield part
+        return
+    if part.is_multipart():
+        for sub in part.get_payload():
+            yield from _walk(sub)
+    else:
+        yield part
+
+
+def iter_parts(msg):
+    """Части письма: (part, ctype, disp, fname, cid, kind).
+    kind: "body" — текст/HTML письма, "inline" — картинка внутри письма (cid:),
+          "attachment" — настоящее вложение (его видно в списке вложений)."""
+    seen_html = seen_text = False
+    for part in _walk(msg):
+        ctype = (part.get_content_type() or "").lower()
+        try:
+            disp = part.get_content_disposition()
+        except Exception:
+            disp = None
+        try:
+            fname = part.get_filename()
+        except Exception:
+            fname = None
+        fname = decode_hdr(fname) if fname else ""
+        cid = str(part.get("Content-ID") or "").strip().strip("<>")
+        if ctype == "message/rfc822":
+            if not fname:
+                inner = part.get_payload()
+                inner = inner[0] if isinstance(inner, list) and inner else inner
+                subj = decode_hdr(inner.get("Subject")) if hasattr(inner, "get") else ""
+                safe = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in subj)
+                fname = (safe.strip(" .")[:80] or "Пересланное письмо") + ".eml"
+            yield part, ctype, disp, fname, cid, "attachment"
+            continue
+        if disp != "attachment" and not fname:
+            if ctype == "text/html" and not seen_html:
+                seen_html = True
+                yield part, ctype, disp, fname, cid, "body"
+                continue
+            if ctype == "text/plain" and not seen_text:
+                seen_text = True
+                yield part, ctype, disp, fname, cid, "body"
+                continue
+        inline = bool(cid) and disp != "attachment" and ctype.startswith("image/")
+        yield part, ctype, disp, fname, cid, ("inline" if inline else "attachment")
+
+
+def _attachment_names(path: Path) -> list:
+    with msgfile.open_message(path) as fh:
+        msg = BytesParser(policy=policy.compat32).parse(fh)
+    names = []
+    for _p, ctype, _d, fname, _c, kind in iter_parts(msg):
+        if kind == "attachment":
+            names.append(fname or ctype)
+    return names
 
 
 def summarize(path: Path, st=None) -> dict:
@@ -67,6 +130,13 @@ def summarize(path: Path, st=None) -> dict:
     except Exception:
         pass
     ctype = (msg.get_content_type() or "").lower()
+    # тело читаем только если в письме могут быть вложения (не простой текст/HTML)
+    att_names = []
+    if ctype.startswith("multipart/") or ctype not in ("text/plain", "text/html"):
+        try:
+            att_names = _attachment_names(path)
+        except Exception:
+            att_names = []
     return {
         "file": path.name,
         "from": frm,
@@ -78,9 +148,11 @@ def summarize(path: Path, st=None) -> dict:
         "msgid": (msg.get("Message-ID") or "").strip(),
         "sent": sent,                       # ISO с часовым поясом, из заголовка Date
         "received": int(st.st_mtime),       # дата получения сервером (IMAP INTERNALDATE)
-        "size": st.st_size,
+        "size": msgfile.raw_size(path, st),     # размер письма без сжатия
+        "fsize": st.st_size,                    # размер файла на диске (для кэша)
         "mtime": int(st.st_mtime),
-        "attach": ctype in ("multipart/mixed", "multipart/report"),
+        "attach": len(att_names),                 # число настоящих вложений
+        "att_names": att_names[:10],
     }
 
 
@@ -116,41 +188,31 @@ def _part_text(part) -> str:
 
 
 def parse_full(path: Path) -> Body:
-    with open(path, "rb") as fh:
+    with msgfile.open_message(path) as fh:
         msg = BytesParser(policy=policy.default).parse(fh)
     body = Body()
     n = 0
-    for part in msg.walk():
+    for part, ctype, disp, fname, cid, kind in iter_parts(msg):
         try:
-            if part.is_multipart():
-                continue
-            ctype = part.get_content_type()
-            disp = part.get_content_disposition()
-            try:
-                fname = part.get_filename()
-            except Exception:
-                fname = None
-            fname = decode_hdr(fname) if fname else ""
-            cid = str(part.get("Content-ID") or "").strip().strip("<>")
-            is_text = ctype in ("text/plain", "text/html")
-            if disp != "attachment" and is_text and not fname:
-                if ctype == "text/html" and body.html is None:
+            if kind == "body":
+                if ctype == "text/html":
                     body.html = _part_text(part)
-                    continue
-                if ctype == "text/plain" and body.text is None:
+                else:
                     body.text = _part_text(part)
-                    continue
+                continue
             n += 1
             if not fname:
                 ext = {"text/plain": ".txt", "text/html": ".html", "message/rfc822": ".eml"}.get(
                     ctype, "." + ctype.split("/")[-1] if "/" in ctype else ".bin")
                 fname = f"attachment_{n}{ext}"
-            data = part.get_payload(decode=True)
-            if data is None:                 # например, message/rfc822
-                data = part.as_bytes() if hasattr(part, "as_bytes") else b""
-            body.attachments.append(Attachment(
-                fname, ctype, data, cid,
-                inline=bool(cid) and disp != "attachment" and ctype.startswith("image/")))
+            if ctype == "message/rfc822":          # пересланное письмо -> .eml
+                inner = part.get_payload()
+                inner = inner[0] if isinstance(inner, list) and inner else inner
+                data = inner.as_bytes() if hasattr(inner, "as_bytes") else b""
+            else:
+                data = part.get_payload(decode=True) or b""
+            body.attachments.append(Attachment(fname, ctype, data, cid,
+                                               inline=(kind == "inline")))
         except Exception:
             continue
     return body

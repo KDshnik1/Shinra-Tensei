@@ -1,7 +1,6 @@
 """Просмотр скачанных писем: дерево ящиков/папок, список с датами, предпросмотр."""
 import html
 import os
-import shutil
 from datetime import date, datetime
 from pathlib import Path
 
@@ -14,9 +13,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QTableView, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
-from core.mail_index import list_mailboxes, load_folder, mailbox_folders
+from core import msgfile
+from core.mail_index import all_mailboxes, load_folder, mailbox_folders
 from core.mailparse import head_text, parse_full, sent_datetime
-from . import theme
+from . import icons, theme
 from .common import run_bg
 
 COLS = ["", "От", "Кому", "Тема", "Отправлено", "Получено", "Размер", "Папка"]
@@ -62,8 +62,12 @@ class MessageModel(QAbstractTableModel):
     def headerData(self, section, orient, role=Qt.ItemDataRole.DisplayRole):
         if orient == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
             return COLS[section]
+        if (orient == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DecorationRole
+                and section == C_ATT):
+            return icons.paperclip(theme.color("text_muted"))
         if orient == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.ToolTipRole:
-            return {C_ATT: "Есть вложения", C_SENT: "Дата из письма (когда отправлено)",
+            return {C_ATT: "Письма с вложениями (щёлкните, чтобы отсортировать)",
+                    C_SENT: "Дата из письма (когда отправлено)",
                     C_RECV: "Когда письмо получил почтовый сервер"}.get(section)
         return None
 
@@ -74,7 +78,7 @@ class MessageModel(QAbstractTableModel):
         c = index.column()
         if role == Qt.ItemDataRole.DisplayRole:
             return {
-                C_ATT: "📎" if r.get("attach") else "",
+                C_ATT: str(int(r.get("attach") or 0)) if (r.get("attach") or 0) > 1 else "",
                 C_FROM: r.get("from_name") or r.get("from_addr") or r.get("from", ""),
                 C_TO: r.get("to", ""),
                 C_SUBJ: r.get("subject") or "(без темы)",
@@ -85,11 +89,18 @@ class MessageModel(QAbstractTableModel):
             }[c]
         if role == SORT_ROLE:
             return {
-                C_ATT: int(bool(r.get("attach"))),
+                C_ATT: int(r.get("attach") or 0),
                 C_SENT: r["_sent_ts"] or 0.0,
                 C_RECV: float(r.get("received") or 0),
                 C_SIZE: r.get("size", 0),
             }.get(c, (self.data(index) or "").lower())
+        if role == Qt.ItemDataRole.DecorationRole and c == C_ATT and r.get("attach"):
+            return icons.paperclip(theme.color("text"))
+        if role == Qt.ItemDataRole.ToolTipRole and c == C_ATT and r.get("attach"):
+            names = r.get("att_names") or []
+            n = int(r.get("attach") or 0)
+            more = f"\n… и ещё {n - len(names)}" if n > len(names) else ""
+            return f"Вложений: {n}\n" + "\n".join(names) + more
         if role == Qt.ItemDataRole.ToolTipRole and c in (C_FROM, C_TO, C_SUBJ):
             return {C_FROM: r.get("from"), C_TO: r.get("to"), C_SUBJ: r.get("subject")}[c]
         if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_ATT, C_SIZE):
@@ -223,7 +234,7 @@ class ViewerWindow(QDialog):
         hh = self.view.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(C_SUBJ, QHeaderView.ResizeMode.Stretch)
-        for c, w in {C_ATT: 28, C_FROM: 190, C_TO: 170, C_SENT: 120, C_RECV: 120,
+        for c, w in {C_ATT: 40, C_FROM: 190, C_TO: 170, C_SENT: 120, C_RECV: 120,
                      C_SIZE: 75, C_FOLDER: 120}.items():
             self.view.setColumnWidth(c, w)
         self.view.selectionModel().currentRowChanged.connect(self._row_changed)
@@ -276,7 +287,7 @@ class ViewerWindow(QDialog):
         prev_key = cur.data(0, Qt.ItemDataRole.UserRole) if cur else None
         self.tree.clear()
         target = None
-        boxes = list_mailboxes(self.cfg.archive_dir)
+        boxes = all_mailboxes(self.cfg)
         for name, mdir in boxes:
             folders = mailbox_folders(mdir)
             top = QTreeWidgetItem([name, str(sum(f["count"] for f in folders))])
@@ -401,6 +412,7 @@ class ViewerWindow(QDialog):
             + line("Отправлено:", fmt_dt(row.get("_sent_local")))
             + line("Получено:", fmt_dt(row.get("_recv_local")))
             + line("Папка:", f"{row.get('folder', '')}   •   {human_size(row.get('size', 0))}")
+            + line("Вложения:", str(int(row.get("attach") or 0)) if row.get("attach") else "")
             + "</table>")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -416,7 +428,8 @@ class ViewerWindow(QDialog):
                 self.browser.inline[a.cid] = a.data
             if a.inline:
                 continue
-            it = QListWidgetItem(f"📎 {a.name} ({human_size(len(a.data))})")
+            it = QListWidgetItem(icons.paperclip(theme.color("text")),
+                                 f"{a.name} ({human_size(len(a.data))})")
             it.setData(Qt.ItemDataRole.UserRole, a)
             self.att_list.addItem(it)
         self.att_list.setVisible(self.att_list.count() > 0)
@@ -470,12 +483,12 @@ class ViewerWindow(QDialog):
                                               str(Path.home() / "Downloads" / name),
                                               "Письмо (*.eml)")
         if path:
-            shutil.copyfile(self._current["path"], path)
+            Path(path).write_bytes(msgfile.read_message(self._current["path"]))
 
     def _open_external(self, *_):
         if self._current and hasattr(os, "startfile"):
             try:
-                os.startfile(self._current["path"])
+                os.startfile(str(msgfile.plain_copy(self._current["path"])))
             except OSError as e:
                 QMessageBox.warning(self, "Открыть письмо",
                                     f"Нет программы для открытия .eml: {e}")

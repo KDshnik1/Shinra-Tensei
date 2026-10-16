@@ -5,7 +5,9 @@
 сообщений (хранилище, папки, письма, получатели, вложения).
 """
 import os
+import re
 import struct
+from array import array
 import uuid
 import zlib
 
@@ -16,7 +18,51 @@ PAGE = 512
 REGION = 0x3E000            # область одной AMap (253 952 байт)
 FIRST_AMAP = 0x4400
 DLIST_IB = 0x4200
-PT_BBT, PT_NBT, PT_FMAP, PT_PMAP, PT_AMAP, PT_DL = 0x80, 0x81, 0x82, 0x83, 0x84, 0x86
+PT_BBT, PT_NBT, PT_FMAP, PT_PMAP, PT_AMAP, PT_FPMAP, PT_DL = 0x80, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86
+
+# Служебные страницы в начале каждой области AMap (как в Microsoft outlook-pst-rs):
+#   +0     AMap  — в каждой области
+#   +512   PMap  — в каждой 8-й области
+#   +1024  FMap  — в области 128, затем каждые 496 областей (первые 128 — в заголовке)
+#   +1536  FPMap — в области 8192 (~2 ГБ), затем каждые 31 744 области (~8 ГБ)
+FMAP_FIRST, FMAP_EVERY = 128, 496
+FPMAP_FIRST, FPMAP_EVERY = 128 * 64, 496 * 64
+
+
+def region_pages(k: int) -> list:
+    """Номера служебных страниц (0..3) в области AMap № k."""
+    pages = [0]
+    if k % 8 == 0:
+        pages.append(1)
+        if k >= FMAP_FIRST and (k - FMAP_FIRST) % FMAP_EVERY == 0:
+            pages.append(2)
+        if k >= FPMAP_FIRST and (k - FPMAP_FIRST) % FPMAP_EVERY == 0:
+            pages.append(3)
+    return pages
+
+
+def mark_bits(bits: bytearray, a: int, b: int):
+    """Установить биты [a, b) в карте (старший бит байта — первый)."""
+    while a < b and a & 7:
+        bits[a >> 3] |= 0x80 >> (a & 7)
+        a += 1
+    while b > a and b & 7:
+        b -= 1
+        bits[b >> 3] |= 0x80 >> (b & 7)
+    if a < b:
+        bits[a >> 3:b >> 3] = b"\xff" * ((b - a) >> 3)
+
+
+_ZERO_RUNS = re.compile(rb"\x00+")
+
+
+def longest_free_run(amap: bytes) -> int:
+    """Самая длинная серия свободных 64-байтовых ячеек (до 255) — значение для FMap."""
+    best = max((len(m) for m in _ZERO_RUNS.findall(amap)), default=0) * 8
+    if best >= 255:
+        return 255
+    bitstr = format(int.from_bytes(amap, "big"), f"0{len(amap) * 8}b")
+    return min(255, max((len(r) for r in bitstr.split("1")), default=0))
 
 NID_MESSAGE_STORE = 0x21
 NID_NAME_TO_ID_MAP = 0x61
@@ -314,21 +360,16 @@ class _Allocator:
 
     @staticmethod
     def reserved_pages(k):
-        n = 1                                      # AMap
-        if k % 8 == 0:
-            n += 1                                 # PMap
-        if k >= 128 and (k - 128) % 496 == 0:
-            n += 1                                 # FMap
-        return n
+        """Сколько страниц в начале области занято служебными (с учётом пропусков)."""
+        return region_pages(k)[-1] + 1
 
     def mark(self, ib, size):
         a = (ib - FIRST_AMAP) // 64
         b = (ib + size - FIRST_AMAP + 63) // 64
         need = b // 8 + 1
         if len(self.bits) < need:
-            self.bits.extend(b"\0" * (need - len(self.bits) + 65536))
-        for i in range(a, b):
-            self.bits[i >> 3] |= 0x80 >> (i & 7)
+            self.bits.extend(b"\0" * (need - len(self.bits) + (1 << 20)))
+        mark_bits(self.bits, a, b)
 
     def alloc(self, size, align):
         p = _align(self.pos, align)
@@ -353,7 +394,9 @@ class PstFile:
         self.path = str(path)
         self.f = open(self.path, "w+b")
         self.al = _Allocator()
-        self.bbt = []                      # (bid, ib, cb)
+        # блоки пишутся с возрастающими BID, поэтому BBT уже отсортирована;
+        # компактные массивы вместо кортежей — для файлов до 10 ГБ
+        self.bbt_bid, self.bbt_ib, self.bbt_cb = array("Q"), array("Q"), array("H")
         self.nbt = []                      # (nid, bid_data, bid_sub, nid_parent)
         self._bid = 0
         self._pbid = 0
@@ -373,6 +416,16 @@ class PstFile:
     def size(self) -> int:
         return self.al.pos
 
+    def close_overhead(self) -> int:
+        """Оценка (с запасом) того, сколько байт добавит close(): таблицы папок,
+        B-деревья узлов и блоков, служебные страницы и выравнивание конца файла."""
+        rows = sum(f["count"] for f in self.folders.values())
+        blocks = len(self.bbt_bid) + rows // 8 + 2000
+        nodes = len(self.nbt) + 4 * len(self.folders) + 64
+        return (blocks * 28 + nodes * 37        # листья и узлы BBT/NBT (+ верхние уровни)
+                + rows * 900                    # строки таблиц содержимого папок
+                + 2 * REGION + 1024 * 1024)     # последняя область AMap и мелочи
+
     # ---------- блоки ----------
     def _write_block(self, data: bytes, internal=False) -> int:
         self._bid += 4
@@ -384,7 +437,9 @@ class PstFile:
                                                              pst_crc(data), bid)
         self.f.seek(ib)
         self.f.write(buf)
-        self.bbt.append((bid, ib, cb))
+        self.bbt_bid.append(bid)
+        self.bbt_ib.append(ib)
+        self.bbt_cb.append(cb)
         return bid
 
     def _write_tree(self, chunks: list) -> int:
@@ -536,30 +591,37 @@ class PstFile:
         self.f.write(body + struct.pack("<BBHIQ", ptype, ptype, _sig(ib, bid), pst_crc(body), bid))
         return bid, ib
 
-    def _write_btree(self, entries: list, ptype: int) -> tuple:
+    def _write_btree(self, count: int, key_at, entry_at, ptype: int) -> tuple:
+        """B-дерево из count записей; key_at(i)/entry_at(i) дают ключ и байты записи i."""
         cbent = {PT_NBT: 32, PT_BBT: 24}[ptype]
-        level = 0
-        items = entries
-        while True:
-            maxent = 488 // (cbent if level == 0 else 24)
-            pages = []
-            for i in range(0, len(items), maxent):
-                part = items[i:i + maxent]
-                raw = b"".join(e[1] for e in part)
-                size = cbent if level == 0 else 24
-                body = raw.ljust(488, b"\0") + struct.pack("<BBBBI", len(part), maxent, size, level, 0)
+        maxent = 488 // cbent
+        pages = []
+        for i in range(0, count, maxent):
+            n = min(maxent, count - i)
+            raw = b"".join(entry_at(j) for j in range(i, i + n))
+            body = raw.ljust(488, b"\0") + struct.pack("<BBBBI", n, maxent, cbent, 0, 0)
+            bid, ib = self._write_page(body, ptype)
+            pages.append((key_at(i), bid, ib))
+        level = 1
+        while len(pages) > 1:
+            maxent = 488 // 24
+            nxt = []
+            for i in range(0, len(pages), maxent):
+                part = pages[i:i + maxent]
+                raw = b"".join(struct.pack("<QQQ", k, b, ib) for k, b, ib in part)
+                body = raw.ljust(488, b"\0") + struct.pack("<BBBBI", len(part), maxent, 24, level, 0)
                 bid, ib = self._write_page(body, ptype)
-                pages.append((part[0][0], bid, ib))
-            if len(pages) == 1:
-                return pages[0][1], pages[0][2]
-            items = [(k, struct.pack("<QQQ", k, b, i)) for k, b, i in pages]
+                nxt.append((part[0][0], bid, ib))
+            pages = nxt
             level += 1
+        return pages[0][1], pages[0][2]
 
     def _write_maps(self):
         last_k = (self.al.pos - 1 - FIRST_AMAP) // REGION
         for k in range(last_k + 1):
             start = FIRST_AMAP + k * REGION
-            self.al.mark(start, self.al.reserved_pages(k) * PAGE)
+            for pg in region_pages(k):
+                self.al.mark(start + pg * PAGE, PAGE)
         eof = FIRST_AMAP + (last_k + 1) * REGION
         bits = self.al.bits
         if len(bits) < (last_k + 1) * 496:
@@ -573,23 +635,17 @@ class PstFile:
 
         for k in range(last_k + 1):
             amap = bytes(bits[k * 496:(k + 1) * 496])
-            free = sum(8 - bin(b).count("1") for b in amap)
-            free_total += free * 64
-            run = best = 0
-            for byte in amap:
-                for j in range(8):
-                    if byte & (0x80 >> j):
-                        run = 0
-                    else:
-                        run += 1
-                        best = max(best, run)
-            longest.append(min(best, 255))
+            free_total += (496 * 8 - int.from_bytes(amap, "big").bit_count()) * 64
+            longest.append(longest_free_run(amap))
             start = FIRST_AMAP + k * REGION
             trailer_page(start, amap, PT_AMAP)
-            if k % 8 == 0:
+            pages = region_pages(k)
+            if 1 in pages:
                 trailer_page(start + PAGE, b"\xff" * 496, PT_PMAP)
+            if 3 in pages:
+                trailer_page(start + 3 * PAGE, b"\xff" * 496, PT_FPMAP)
         for k in range(last_k + 1):
-            if k >= 128 and (k - 128) % 496 == 0:
+            if 2 in region_pages(k):
                 fm = bytes(longest[k:k + 496]).ljust(496, b"\0")
                 trailer_page(FIRST_AMAP + k * REGION + 2 * PAGE, fm, PT_FMAP)
         dl = struct.pack("<BBHI", 0x01, 0, 0, 0).ljust(496, b"\0")
@@ -602,11 +658,14 @@ class PstFile:
         self._write_folders()
         self._write_special()
         nbt = sorted(self.nbt)
-        nbt_entries = [(n, struct.pack("<QQQII", n, d, s, p, 0)) for n, d, s, p in nbt]
-        bbt_entries = [(b, struct.pack("<QQHHI", b, ib, cb, 2, 0))
-                       for b, ib, cb in sorted(self.bbt)]
-        nbt_bid, nbt_ib = self._write_btree(nbt_entries, PT_NBT)
-        bbt_bid, bbt_ib = self._write_btree(bbt_entries, PT_BBT)
+        self.nbt = []
+        nbt_bid, nbt_ib = self._write_btree(
+            len(nbt), lambda i: nbt[i][0],
+            lambda i: struct.pack("<QQQII", *nbt[i], 0), PT_NBT)
+        bb, bi, bc = self.bbt_bid, self.bbt_ib, self.bbt_cb
+        bbt_bid, bbt_ib = self._write_btree(
+            len(bb), lambda i: bb[i],
+            lambda i: struct.pack("<QQHHI", bb[i], bi[i], bc[i], 2, 0), PT_BBT)
         eof, amap_last, amap_free = self._write_maps()
 
         rgnid = [0x400] * 32

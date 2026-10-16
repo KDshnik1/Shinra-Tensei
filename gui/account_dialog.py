@@ -1,22 +1,26 @@
 """Окно настройки почтового ящика."""
 import copy
+import os
 from datetime import date
+from pathlib import Path
 
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
-                               QDialogButtonBox, QFormLayout, QGroupBox, QHBoxLayout,
+                               QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
                                QSpinBox, QVBoxLayout)
 
 from core.imap_client import ImapConnection
 from core.models import SECURITY_OPTIONS, Account
+from core.storage import safe_name
 from . import theme
 from .common import run_bg
 
 
 class AccountDialog(QDialog):
-    def __init__(self, parent=None, account: Account | None = None):
+    def __init__(self, parent=None, account: Account | None = None, default_archive: str = ""):
         super().__init__(parent)
+        self.default_archive = default_archive
         self.account = copy.deepcopy(account) if account else Account()
         self.setWindowTitle("Изменить почтовый ящик" if account else "Добавить почтовый ящик")
         self.setMinimumWidth(560)
@@ -102,6 +106,30 @@ class AccountDialog(QDialog):
         self.rb_one_folder.toggled.connect(self._sync_enabled)
         lay.addWidget(g)
 
+        g = QGroupBox("Куда сохранять письма (.eml)")
+        v = QVBoxLayout(g)
+        self.rb_arch_default = QRadioButton("В общую папку архива")
+        self.rb_arch_own = QRadioButton("В свою папку:")
+        bg3 = QButtonGroup(self)
+        bg3.addButton(self.rb_arch_default)
+        bg3.addButton(self.rb_arch_own)
+        self.ed_arch = QLineEdit(placeholderText="Выберите папку…")
+        self.btn_arch = QPushButton("Обзор…")
+        self.btn_arch.clicked.connect(self._browse_archive)
+        h = QHBoxLayout()
+        h.addWidget(self.rb_arch_own)
+        h.addWidget(self.ed_arch, 1)
+        h.addWidget(self.btn_arch)
+        v.addWidget(self.rb_arch_default)
+        v.addLayout(h)
+        self.lbl_arch = QLabel()
+        self.lbl_arch.setWordWrap(True)
+        v.addWidget(self.lbl_arch)
+        self.rb_arch_own.toggled.connect(self._sync_enabled)
+        self.ed_arch.textChanged.connect(self._update_arch_label)
+        self.ed_email.textChanged.connect(self._update_arch_label)
+        lay.addWidget(g)
+
         self.lbl_info = QLabel()
         self.lbl_info.setWordWrap(True)
         lay.addWidget(self.lbl_info)
@@ -141,6 +169,8 @@ class AccountDialog(QDialog):
         if a.folder_raw:
             self.cb_folder.addItem(a.folder_display or a.folder_raw, a.folder_raw)
         (self.rb_one_folder if a.folder_mode == "one" else self.rb_all_folders).setChecked(True)
+        self.ed_arch.setText(a.archive_dir)
+        (self.rb_arch_own if a.archive_dir else self.rb_arch_default).setChecked(True)
         self._sync_enabled()
 
     def _sync_enabled(self):
@@ -149,6 +179,31 @@ class AccountDialog(QDialog):
         self.de_to.setEnabled(r)
         o = self.rb_one_folder.isChecked()
         self.cb_folder.setEnabled(o)
+        own = self.rb_arch_own.isChecked()
+        self.ed_arch.setEnabled(own)
+        self.btn_arch.setEnabled(own)
+        self._update_arch_label()
+
+    def _archive_root(self) -> str:
+        if self.rb_arch_own.isChecked():
+            return self.ed_arch.text().strip()
+        return self.default_archive
+
+    def _update_arch_label(self, *_):
+        root = self._archive_root()
+        email = self.ed_email.text().strip().lower()
+        if not root:
+            self.lbl_arch.setText("Укажите папку, куда сохранять письма этого ящика.")
+            return
+        sub = safe_name(email, 100) if "@" in email else "<e-mail>"
+        self.lbl_arch.setText(f"Письма будут сохраняться в: {Path(root) / sub}")
+
+    def _browse_archive(self):
+        start = self.ed_arch.text().strip() or self.default_archive or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "Куда сохранять письма", start)
+        if d:
+            self.ed_arch.setText(os.path.normpath(d))
+            self.rb_arch_own.setChecked(True)
 
     def _autofill(self):
         email = self.ed_email.text().strip()
@@ -184,6 +239,7 @@ class AccountDialog(QDialog):
         a.folder_mode = "one" if self.rb_one_folder.isChecked() else "all"
         a.folder_raw = self.cb_folder.currentData() or ""
         a.folder_display = self.cb_folder.currentText()
+        a.archive_dir = self.ed_arch.text().strip() if self.rb_arch_own.isChecked() else ""
         return a
 
     def _validate(self, a: Account, need_password=False) -> str | None:
@@ -195,6 +251,16 @@ class AccountDialog(QDialog):
             return "Укажите пароль."
         if a.date_mode == "range" and date.fromisoformat(a.date_from) > date.fromisoformat(a.date_to):
             return "Дата «с» больше даты «по»."
+        if self.rb_arch_own.isChecked():
+            if not a.archive_dir:
+                return "Укажите папку для писем или выберите «В общую папку архива»."
+            try:
+                Path(a.archive_dir).mkdir(parents=True, exist_ok=True)
+                probe = Path(a.archive_dir) / ".shinra_write_test"
+                probe.write_bytes(b"")
+                probe.unlink()
+            except OSError as e:
+                return f"Нет доступа на запись в папку «{a.archive_dir}»: {e.strerror or e}"
         return None
 
     def _busy(self, on: bool, text=""):

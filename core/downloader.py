@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from .imap_client import ImapConnection, ImapError, is_connection_error
+from . import msgfile
 from .storage import MailboxArchive
 
 MAX_AUTO_RECONNECTS = 3
@@ -35,8 +36,9 @@ def _d(s: str):
 class Downloader:
     """cb — объект с методами status, progress, log, counters, ask, finished."""
 
-    def __init__(self, account, archive_root, cb, stop_event, semaphore):
+    def __init__(self, account, archive_root, cb, stop_event, semaphore, compress=False):
         self.acc = account
+        self.compress = compress
         self.cb = cb
         self.stop = stop_event
         self.sem = semaphore
@@ -159,7 +161,8 @@ class Downloader:
                 self.cb.log(f"Папка «{f.display}» пропущена: {e}")
                 continue
             fdir = self.archive.folder_dir(f)
-            todo = [u for u in uids if not self.archive.message_path(fdir, uv, u).exists()]
+            have = msgfile.existing_keys(fdir)
+            todo = [u for u in uids if MailboxArchive.message_key(uv, u) not in have]
             self.already += len(uids) - len(todo)
             self.cb.log(f"«{f.display}»: писем {len(uids)}, новых {len(todo)}")
             if todo:
@@ -206,7 +209,7 @@ class Downloader:
             self._check_stop()
             try:
                 body, flags, idate = self.conn.fetch(uid)
-                self.archive.save_message(fdir, uv, uid, body, flags, idate)
+                self.archive.save_message(fdir, uv, uid, body, flags, idate, self.compress)
                 self.downloaded += 1
                 self._counters()
                 return

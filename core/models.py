@@ -84,6 +84,7 @@ class Account:
     folder_mode: str = "all"           # all | one
     folder_raw: str = ""               # имя папки как на сервере (mUTF-7)
     folder_display: str = ""
+    archive_dir: str = ""              # своя папка для .eml; пусто — общая папка архива
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def period_text(self) -> str:
@@ -106,6 +107,26 @@ class Account:
 
 
 class Config:
+    # ---------- где лежат письма ящика ----------
+    def archive_root_for(self, acc) -> str:
+        return (acc.archive_dir or "").strip() or self.archive_dir
+
+    def mailbox_dir(self, acc) -> Path:
+        from .storage import MailboxArchive
+        return MailboxArchive(self.archive_root_for(acc), acc.email).dir
+
+    def account_by_email(self, email: str):
+        key = email.strip().lower()
+        for a in self.accounts:
+            if a.email.strip().lower() == key:
+                return a
+        return None
+
+    def mailbox_dir_by_email(self, email: str) -> Path:
+        from .storage import MailboxArchive
+        acc = self.account_by_email(email)
+        return self.mailbox_dir(acc) if acc else MailboxArchive(self.archive_dir, email).dir
+
     def __init__(self):
         self.path = app_data_dir() / "config.json"
         self.accounts: list[Account] = []
@@ -113,6 +134,7 @@ class Config:
         self.pst_dir = str(default_pst_dir())
         self.parallel = 3
         self.theme = "system"          # system | light | dark
+        self.split_gb = 10.0           # размер одной части PST, ГБ
 
     def load(self):
         if not self.path.exists():
@@ -125,6 +147,10 @@ class Config:
         self.pst_dir = data.get("pst_dir", self.pst_dir)
         self.parallel = int(data.get("parallel", self.parallel))
         self.theme = data.get("theme", self.theme)
+        try:
+            self.split_gb = float(data.get("split_gb", self.split_gb))
+        except (TypeError, ValueError):
+            pass
         known = {f.name for f in fields(Account)}
         for raw in data.get("accounts", []):
             enc = raw.pop("password_enc", "")
@@ -144,6 +170,7 @@ class Config:
             "pst_dir": self.pst_dir,
             "parallel": self.parallel,
             "theme": self.theme,
+            "split_gb": self.split_gb,
             "accounts": accs,
         }
         tmp = self.path.with_suffix(".tmp")

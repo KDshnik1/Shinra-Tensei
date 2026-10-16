@@ -3,16 +3,20 @@ import collections
 import copy
 import html
 import os
+import shutil
 import sys
 import threading
+import time
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtGui import QAction, QColor
+from PySide6.QtGui import QAction, QColor, QCursor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout,
-                               QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
+                               QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QSpinBox, QSplitter,
-                               QStyle, QTableWidget, QTableWidgetItem, QToolBar, QVBoxLayout,
+                               QStyle, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
+                               QVBoxLayout,
                                QWidget, QSizePolicy)
 
 from core.downloader import Downloader
@@ -20,12 +24,14 @@ from core.models import APP_NAME, Config, app_data_dir
 from core.storage import MailboxArchive
 from gui.account_dialog import AccountDialog
 from gui import theme
+from gui.common import progress_text, run_bg, set_progress
 from gui.export_dialog import ExportDialog
 from gui.viewer import ViewerWindow
 
-COLS = ["E-mail", "Сервер", "Период", "Папки", "Статус", "Прогресс",
+COLS = ["", "E-mail", "Сервер", "Период", "Папки", "Статус", "Прогресс",
         "Загружено", "Уже в архиве", "Ошибки"]
-C_STATUS, C_PROGRESS, C_DL, C_ALREADY, C_ERR = 4, 5, 6, 7, 8
+C_CHECK, C_EMAIL = 0, 1
+C_STATUS, C_PROGRESS, C_DL, C_ALREADY, C_ERR = 5, 6, 7, 8, 9
 
 
 class Bridge(QObject):
@@ -48,6 +54,13 @@ class Callbacks:
     def counters(self, d, a, e): self.b.counters.emit(self.id, d, a, e)
     def ask(self, q): self.b.ask.emit(q)
     def finished(self, kind, msg): self.b.finished.emit(self.id, kind, msg)
+
+
+def _same_path(a, b) -> bool:
+    try:
+        return os.path.normcase(str(Path(a).resolve())) == os.path.normcase(str(Path(b).resolve()))
+    except OSError:
+        return os.path.normcase(str(a)) == os.path.normcase(str(b))
 
 
 def new_state():
@@ -82,6 +95,11 @@ class MainWindow(QMainWindow):
 
         self._applying_theme = False
         self._viewer = None
+        self.checked = set()         # id отмеченных галочкой ящиков
+        self._exports = []           # открытые окна экспорта (немодальные)
+        self._log_views = {}         # e-mail -> QPlainTextEdit вкладки журнала
+        self._log_kind = {}          # e-mail -> итог (для цвета вкладки)
+        self._filling = False
         self._build_ui()
         self._refresh_table()
         self._sync_actions()
@@ -120,19 +138,23 @@ class MainWindow(QMainWindow):
             return a
         SP = QStyle.StandardPixmap
         self.a_add = act("Добавить ящик", SP.SP_FileDialogNewFolder, self._add)
-        self.a_edit = act("Изменить", SP.SP_FileDialogDetailedView, self._edit)
+        self.a_edit = act("Изменить", SP.SP_FileDialogDetailedView, self._edit,
+                          "Изменить выделенный ящик")
         self.a_dup = act("Копировать", SP.SP_FileDialogListView, self._duplicate,
                          "Создать ящик на основе выбранного (тот же сервер и настройки)")
-        self.a_del = act("Удалить", SP.SP_TrashIcon, self._delete)
+        self.a_del = act("Удалить", SP.SP_TrashIcon, self._delete,
+                         "Удалить отмеченные ящики (или выделенный, если галочек нет)")
         tb.addSeparator()
-        self.a_run_sel = act("Запустить выбранные", SP.SP_MediaPlay, self._run_selected)
+        self.a_run_sel = act("Запустить выбранные", SP.SP_MediaPlay, self._run_selected,
+                             "Запустить загрузку отмеченных ящиков (или выделенного)")
         self.a_run_all = act("Запустить все", SP.SP_MediaSeekForward, self._run_all)
         self.a_stop = act("Остановить", SP.SP_MediaStop, self._stop_selected,
-                          "Остановить выбранные (если ничего не выбрано — все)")
+                          "Остановить отмеченные/выделенные (если таких нет — все)")
         tb.addSeparator()
         self.a_view = act("Просмотр писем", SP.SP_FileDialogContentsView, self._view,
                           "Просмотреть скачанные письма (выбранного ящика или всех)")
-        self.a_export = act("Экспорт в PST", SP.SP_DialogSaveButton, self._export)
+        self.a_export = act("Экспорт в PST", SP.SP_DialogSaveButton, self._export,
+                            "Экспорт в PST (отмеченные ящики будут выбраны заранее)")
         self.a_open = act("Открыть архив", SP.SP_DirOpenIcon, self._open_archive)
         self.a_arch = act("Папка архива…", SP.SP_DriveHDIcon, self._choose_archive)
 
@@ -163,16 +185,28 @@ class MainWindow(QMainWindow):
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(C_STATUS, QHeaderView.ResizeMode.Stretch)
-        for c, w in enumerate([220, 190, 150, 130, 0, 170, 85, 95, 65]):
+        hh.setSectionResizeMode(C_CHECK, QHeaderView.ResizeMode.Fixed)
+        for c, w in enumerate([34, 220, 190, 150, 130, 0, 210, 85, 95, 65]):
             if w:
                 self.table.setColumnWidth(c, w)
-        self.table.doubleClicked.connect(self._edit)
+        hdr = QTableWidgetItem("✔")
+        hdr.setToolTip("Отметить все ящики / снять все отметки")
+        self.table.setHorizontalHeaderItem(C_CHECK, hdr)
+        hh.sectionClicked.connect(self._header_clicked)
+        self.table.doubleClicked.connect(self._double_clicked)
         self.table.itemSelectionChanged.connect(self._sync_actions)
+        self.table.itemChanged.connect(self._item_changed)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._context_menu)
         split.addWidget(self.table)
 
-        self.log = QPlainTextEdit(readOnly=True)
-        self.log.setMaximumBlockCount(10000)
-        split.addWidget(self.log)
+        self.log_tabs = QTabWidget()
+        self.log_tabs.setDocumentMode(True)
+        self.log_tabs.setUsesScrollButtons(True)
+        self.log = self._new_log_view()             # вкладка «Все»: общий журнал
+        self.log_tabs.addTab(self.log, "Все")
+        self.log_tabs.setTabToolTip(0, "Журнал всех ящиков вместе")
+        split.addWidget(self.log_tabs)
         split.setSizes([450, 250])
         w = QWidget()
         wl = QVBoxLayout(w)
@@ -184,7 +218,8 @@ class MainWindow(QMainWindow):
 
     def _update_statusbar(self):
         self.statusBar().showMessage(
-            f"Архив: {self.cfg.archive_dir}   |   Работает: {len(self.running)}")
+            f"Архив: {self.cfg.archive_dir}   |   Работает: {len(self.running)}"
+            f"   |   Отмечено ящиков: {len(self.checked)}")
 
     # ================= таблица =================
     def _row_of(self, acc_id):
@@ -197,17 +232,61 @@ class MainWindow(QMainWindow):
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
         return [self.cfg.accounts[r] for r in rows if r < len(self.cfg.accounts)]
 
+    def _checked_accounts(self):
+        return [a for a in self.cfg.accounts if a.id in self.checked]
+
+    def _targets(self):
+        """Ящики для действия: отмеченные галочкой, а если галочек нет — выделенные."""
+        return self._checked_accounts() or self._selected_accounts()
+
+    def _item_changed(self, item):
+        if self._filling or item.column() != C_CHECK:
+            return
+        r = item.row()
+        if r >= len(self.cfg.accounts):
+            return
+        acc_id = self.cfg.accounts[r].id
+        if item.checkState() == Qt.CheckState.Checked:
+            self.checked.add(acc_id)
+        else:
+            self.checked.discard(acc_id)
+        self._sync_actions()
+
+    def _header_clicked(self, section):
+        if section != C_CHECK or not self.cfg.accounts:
+            return
+        all_on = len(self.checked) == len(self.cfg.accounts)
+        self.checked = set() if all_on else {a.id for a in self.cfg.accounts}
+        self._refresh_table()
+
+    def _double_clicked(self, index):
+        if index.column() != C_CHECK:
+            self._edit()
+
     def _refresh_table(self):
-        self.table.setRowCount(len(self.cfg.accounts))
-        for r, a in enumerate(self.cfg.accounts):
-            self.state.setdefault(a.id, new_state())
-            for c, text in enumerate([a.email, f"{a.host}:{a.port}", a.period_text(),
-                                      a.folder_text()]):
-                self.table.setItem(r, c, QTableWidgetItem(text))
-            pb = QProgressBar()
-            pb.setTextVisible(True)
-            self.table.setCellWidget(r, C_PROGRESS, pb)
-            self._update_row(a.id)
+        self._filling = True
+        try:
+            ids = {a.id for a in self.cfg.accounts}
+            self.checked &= ids
+            self.table.setRowCount(len(self.cfg.accounts))
+            for r, a in enumerate(self.cfg.accounts):
+                self.state.setdefault(a.id, new_state())
+                chk = QTableWidgetItem()
+                chk.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled |
+                             Qt.ItemFlag.ItemIsSelectable)
+                chk.setCheckState(Qt.CheckState.Checked if a.id in self.checked
+                                  else Qt.CheckState.Unchecked)
+                self.table.setItem(r, C_CHECK, chk)
+                for c, text in enumerate([a.email, f"{a.host}:{a.port}", a.period_text(),
+                                          a.folder_text()], start=C_EMAIL):
+                    self.table.setItem(r, c, QTableWidgetItem(text))
+                pb = QProgressBar()
+                pb.setTextVisible(True)
+                self.table.setCellWidget(r, C_PROGRESS, pb)
+                self._update_row(a.id)
+        finally:
+            self._filling = False
+        self._sync_actions()
 
     def _update_row(self, acc_id):
         r = self._row_of(acc_id)
@@ -226,24 +305,36 @@ class MainWindow(QMainWindow):
             self.table.setItem(r, c, ci)
         pb = self.table.cellWidget(r, C_PROGRESS)
         if pb:
-            pb.setRange(0, max(s["total"], 1))
-            pb.setValue(s["done"] if s["total"] else (1 if s["kind"] == "ok" else 0))
-            pb.setFormat(f"{s['done']} / {s['total']}" if s["total"] else "")
+            if s["total"]:
+                set_progress(pb, s["done"], s["total"])
+                pb.setToolTip(f"Скачано новых писем: {progress_text(s['done'], s['total'])}")
+            else:
+                pb.setRange(0, 1)
+                finished_ok = s["kind"] in ("ok", "warn")
+                pb.setValue(1 if finished_ok else 0)
+                pb.setFormat("Новых писем нет (100%)" if finished_ok else "")
+                pb.setToolTip("")
 
     def _sync_actions(self):
+        if not hasattr(self, "a_edit"):
+            return
         sel = self._selected_accounts()
-        any_running_sel = any(a.id in self.running for a in sel)
-        self.a_edit.setEnabled(len(sel) == 1 and not any_running_sel)
+        targets = self._targets()
+        self.a_edit.setEnabled(len(sel) == 1 and sel[0].id not in self.running)
         self.a_dup.setEnabled(len(sel) == 1)
-        self.a_del.setEnabled(bool(sel) and not any_running_sel)
-        self.a_run_sel.setEnabled(bool(sel))
+        self.a_del.setEnabled(any(a.id not in self.running for a in targets))
+        self.a_run_sel.setEnabled(any(a.id not in self.running for a in targets))
+        n = len(self.checked)
+        self.a_run_sel.setText(f"Запустить отмеченные ({n})" if n else "Запустить выбранные")
+        if len(sel) == 1:
+            self._show_log_of(sel[0].email)
         self.a_stop.setEnabled(bool(self.running))
         self.a_arch.setEnabled(not self.running)
         self._update_statusbar()
 
     # ================= управление ящиками =================
     def _add(self):
-        d = AccountDialog(self)
+        d = AccountDialog(self, default_archive=self.cfg.archive_dir)
         if d.exec():
             self.cfg.accounts.append(d.account)
             self.cfg.save()
@@ -251,13 +342,85 @@ class MainWindow(QMainWindow):
 
     def _edit(self, *_):
         sel = self._selected_accounts()
-        if len(sel) != 1 or sel[0].id in self.running:
+        if len(sel) == 1:
+            self._edit_account(sel[0])
+
+    def _edit_account(self, acc):
+        if acc.id in self.running:
+            QMessageBox.information(self, "Изменение", "Идёт загрузка этого ящика — "
+                                    "сначала остановите её.")
             return
-        d = AccountDialog(self, sel[0])
-        if d.exec():
-            self.cfg.accounts[self._row_of(sel[0].id)] = d.account
-            self.cfg.save()
-            self._refresh_table()
+        d = AccountDialog(self, acc, default_archive=self.cfg.archive_dir)
+        if not d.exec():
+            return
+        new = d.account
+        old_dir, new_dir = self.cfg.mailbox_dir(acc), self.cfg.mailbox_dir(new)
+        if _same_path(old_dir, new_dir) or not (old_dir / MailboxArchive.META).exists():
+            self._apply_account(acc.id, new)
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Папка для писем изменилась")
+        box.setText(f"Уже скачанные письма этого ящика лежат в:\n{old_dir}\n\n"
+                    f"Новая папка:\n{new_dir}\n\nПеренести письма в новую папку?")
+        box.setInformativeText("Если не переносить, в новой папке загрузка начнётся заново, "
+                               "а старые письма останутся на прежнем месте.")
+        R = QMessageBox.ButtonRole
+        b_move = box.addButton("Перенести письма", R.AcceptRole)
+        b_keep = box.addButton("Не переносить", R.DestructiveRole)
+        box.addButton("Отмена", R.RejectRole)
+        box.setDefaultButton(b_move)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_keep:
+            self._apply_account(acc.id, new)
+        elif clicked is b_move:
+            self._move_mailbox(acc, new, old_dir, new_dir)
+
+    def _apply_account(self, acc_id, new):
+        self.cfg.accounts[self._row_of(acc_id)] = new
+        self.cfg.save()
+        self._refresh_table()
+
+    def _move_mailbox(self, acc, new, old_dir, new_dir):
+        if new_dir.exists() and any(new_dir.iterdir()):
+            QMessageBox.warning(self, "Перенос писем",
+                                f"В новой папке уже есть письма этого ящика:\n{new_dir}\n\n"
+                                "Перенос отменён, настройки не изменены. Выберите пустую папку "
+                                "или перенесите письма вручную.")
+            return
+        self.running[acc.id] = threading.Event()        # блокирует запуск и изменение
+        self.state[acc.id].update(status="Перенос писем в новую папку…", kind="running",
+                                  done=0, total=0)
+        self._update_row(acc.id)
+        self._sync_actions()
+        self._write_log(acc.email, f"Перенос писем: {old_dir} → {new_dir}")
+
+        def job():
+            new_dir.parent.mkdir(parents=True, exist_ok=True)
+            if new_dir.exists():
+                new_dir.rmdir()                          # пустая — убираем, чтобы move не вложил
+            shutil.move(str(old_dir), str(new_dir))     # тот же диск — мгновенно
+            return True
+
+        def done(_):
+            self.running.pop(acc.id, None)
+            self._apply_account(acc.id, new)
+            self.state[new.id].update(status="Письма перенесены в новую папку", kind="ok")
+            self._update_row(new.id)
+            self._write_log(new.email, "Перенос завершён")
+            self._sync_actions()
+
+        def fail(err):
+            self.running.pop(acc.id, None)
+            self.state[acc.id].update(status=f"Перенос не удался: {err}", kind="error")
+            self._update_row(acc.id)
+            self._write_log(acc.email, f"Перенос не удался, настройки не изменены: {err}")
+            self._sync_actions()
+            QMessageBox.warning(self, "Перенос писем",
+                                f"Не удалось перенести письма:\n{err}\n\nНастройки ящика не "
+                                f"изменены. Проверьте обе папки:\n{old_dir}\n{new_dir}")
+        run_bg(job, done, fail)
 
     def _duplicate(self):
         sel = self._selected_accounts()
@@ -268,7 +431,7 @@ class MainWindow(QMainWindow):
         base.id = Account().id
         base.email = base.login = ""
         base.password = ""
-        d = AccountDialog(self, base)
+        d = AccountDialog(self, base, default_archive=self.cfg.archive_dir)
         d.setWindowTitle("Добавить почтовый ящик")
         if d.exec():
             self.cfg.accounts.append(d.account)
@@ -276,7 +439,10 @@ class MainWindow(QMainWindow):
             self._refresh_table()
 
     def _delete(self):
-        sel = [a for a in self._selected_accounts() if a.id not in self.running]
+        self._delete_accounts(self._targets())
+
+    def _delete_accounts(self, accounts):
+        sel = [a for a in accounts if a.id not in self.running]
         if not sel:
             return
         names = "\n".join(a.email for a in sel)
@@ -286,6 +452,11 @@ class MainWindow(QMainWindow):
             return
         ids = {a.id for a in sel}
         self.cfg.accounts = [a for a in self.cfg.accounts if a.id not in ids]
+        self.checked -= ids
+        for i in ids:
+            self.state.pop(i, None)
+        for a in sel:
+            self._remove_log_tab(a.email)
         self.cfg.save()
         self._refresh_table()
 
@@ -305,6 +476,8 @@ class MainWindow(QMainWindow):
         try:
             theme.apply(QApplication.instance(), self.cfg.theme)
             self._refresh_table()       # перекрасить статусы под новую тему
+            for email in list(self._log_views):
+                self._color_log_tab(email)
         finally:
             self._applying_theme = False
 
@@ -321,31 +494,104 @@ class MainWindow(QMainWindow):
 
     def _open_archive(self):
         sel = self._selected_accounts()
-        path = MailboxArchive(self.cfg.archive_dir, sel[0].email).dir if len(sel) == 1 \
-            else self.cfg.archive_dir
+        path = self.cfg.mailbox_dir(sel[0]) if len(sel) == 1 else self.cfg.archive_dir
         os.makedirs(path, exist_ok=True)
         if hasattr(os, "startfile"):
             os.startfile(str(path))
 
     def _view(self):
         sel = self._selected_accounts()
+        self._view_account(sel[0] if len(sel) == 1 else None)
+
+    def _view_account(self, acc):
+        email = acc.email if acc else None
         if self._viewer is None:
-            self._viewer = ViewerWindow(self, self.cfg, sel[0].email if len(sel) == 1 else None)
+            self._viewer = ViewerWindow(self, self.cfg, email)
             self._viewer.finished.connect(lambda *_: setattr(self, "_viewer", None))
             self._viewer.show()
         else:
-            self._viewer._fill_tree(sel[0].email if len(sel) == 1 else None)
+            self._viewer._fill_tree(email)
             self._viewer.showNormal()
             self._viewer.raise_()
             self._viewer.activateWindow()
 
     def _export(self):
-        ExportDialog(self, self.cfg).exec()
-        self.cfg.save()
+        checked = self._checked_accounts()
+        self._export_accounts(checked or None)
+
+    def _export_accounts(self, accounts):
+        """Окно экспорта — отдельное: главное окно и загрузка работают параллельно.
+        Можно открыть несколько окон экспорта для разных ящиков."""
+        d = ExportDialog(self, self.cfg, [a.email for a in accounts] if accounts else None,
+                         log_sink=self.log_for)
+        self._exports.append(d)
+        d.closed.connect(self._export_closed)
+        d.show()
+        d.raise_()
+        d.activateWindow()
+
+    def _export_closed(self, d):
+        if d in self._exports:
+            self._exports.remove(d)
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
+        d.deleteLater()
+
+    # ================= контекстное меню =================
+    def _context_menu(self, pos):
+        row = self.table.rowAt(pos.y())
+        if row < 0 or row >= len(self.cfg.accounts):
+            return
+        acc = self.cfg.accounts[row]
+        if acc.id in self.checked and len(self.checked) > 1:
+            targets = self._checked_accounts()          # действие для всех отмеченных
+        else:
+            targets = [acc]
+            if acc not in self._selected_accounts():
+                self.table.selectRow(row)
+        many = len(targets) > 1
+        suffix = f" ({len(targets)})" if many else ""
+        idle = [a for a in targets if a.id not in self.running]
+        busy = [a for a in targets if a.id in self.running]
+        st = self.style()
+        SP = QStyle.StandardPixmap
+
+        m = QMenu(self)
+        a_run = m.addAction(st.standardIcon(SP.SP_MediaPlay),
+                            ("Запуск загрузки писем отмеченных ящиков" if many
+                             else "Запуск загрузки писем") + suffix)
+        a_run.setEnabled(bool(idle))
+        a_stop = None
+        if busy:
+            a_stop = m.addAction(st.standardIcon(SP.SP_MediaStop),
+                                 "Остановить загрузку" + (f" ({len(busy)})" if many else ""))
+        a_exp = m.addAction(st.standardIcon(SP.SP_DialogSaveButton),
+                            ("Экспорт отмеченных ящиков в PST" if many
+                             else "Экспорт почтового ящика в PST") + suffix)
+        a_view = m.addAction(st.standardIcon(SP.SP_FileDialogContentsView), "Просмотр писем")
+        m.addSeparator()
+        a_edit = m.addAction(st.standardIcon(SP.SP_FileDialogDetailedView),
+                             "Изменение почтового ящика")
+        a_edit.setEnabled(not many and acc.id not in self.running)
+        a_del = m.addAction(st.standardIcon(SP.SP_TrashIcon),
+                            ("Удаление отмеченных ящиков" if many
+                             else "Удаление почтового ящика") + suffix)
+        a_del.setEnabled(bool(idle))
+
+        a_run.triggered.connect(lambda: self._start(idle))
+        if a_stop is not None:
+            a_stop.triggered.connect(lambda: [self._stop_one(x.id) for x in busy])
+        a_exp.triggered.connect(lambda: self._export_accounts(targets))
+        a_view.triggered.connect(lambda: self._view_account(acc))
+        a_edit.triggered.connect(lambda: self._edit_account(acc))
+        a_del.triggered.connect(lambda: self._delete_accounts(idle))
+        m.exec(QCursor.pos())
 
     # ================= запуск / остановка =================
     def _run_selected(self):
-        self._start(self._selected_accounts())
+        self._start(self._targets())
 
     def _run_all(self):
         self._start(list(self.cfg.accounts))
@@ -372,28 +618,80 @@ class MainWindow(QMainWindow):
             st = self.state[a.id] = new_state()
             st.update(status="В очереди", kind="running")
             self._update_row(a.id)
-            d = Downloader(copy.deepcopy(a), self.cfg.archive_dir,
+            d = Downloader(copy.deepcopy(a), self.cfg.archive_root_for(a),
                            Callbacks(self.bridge, a.id), stop, self.sem)
             threading.Thread(target=d.run, name=f"dl-{a.email}", daemon=True).start()
             self._write_log(a.email, "Запуск загрузки")
         self._sync_actions()
 
     def _stop_selected(self):
-        sel = [a for a in self._selected_accounts() if a.id in self.running]
+        sel = [a for a in self._targets() if a.id in self.running]
         targets = [a.id for a in sel] if sel else list(self.running)
         for acc_id in targets:
-            self.running[acc_id].set()
-            self.state[acc_id].update(status="Остановка…")
-            self._update_row(acc_id)
+            self._stop_one(acc_id)
+
+    def _stop_one(self, acc_id):
+        ev = self.running.get(acc_id)
+        if ev is None:
+            return
+        ev.set()
+        self.state[acc_id].update(status="Остановка…")
+        self._update_row(acc_id)
 
     # ================= сигналы от потоков =================
     def _email(self, acc_id):
         r = self._row_of(acc_id)
         return self.cfg.accounts[r].email if r >= 0 else acc_id
 
+    @staticmethod
+    def _new_log_view():
+        v = QPlainTextEdit(readOnly=True)
+        v.setMaximumBlockCount(20000)
+        return v
+
+    def _log_view(self, email: str):
+        """Вкладка журнала ящика (создаётся при первой записи)."""
+        key = email.strip().lower()
+        v = self._log_views.get(key)
+        if v is None:
+            v = self._new_log_view()
+            self._log_views[key] = v
+            i = self.log_tabs.addTab(v, email)
+            self.log_tabs.setTabToolTip(i, f"Журнал ящика {email}")
+        return v
+
+    def _color_log_tab(self, email: str):
+        key = email.strip().lower()
+        v = self._log_views.get(key)
+        if v is None:
+            return
+        i = self.log_tabs.indexOf(v)
+        kind = self._log_kind.get(key)
+        color = theme.status_color(kind) if kind in ("error", "warn") else theme.color("text")
+        self.log_tabs.tabBar().setTabTextColor(i, QColor(color))
+
+    def _remove_log_tab(self, email: str):
+        v = self._log_views.pop(email.strip().lower(), None)
+        self._log_kind.pop(email.strip().lower(), None)
+        if v is not None:
+            self.log_tabs.removeTab(self.log_tabs.indexOf(v))
+            v.deleteLater()
+
+    def _show_log_of(self, email: str):
+        v = self._log_views.get(email.strip().lower())
+        if v is not None:
+            self.log_tabs.setCurrentWidget(v)
+
+    def log_for(self, email, text):
+        """Приёмник журнала из окна экспорта."""
+        self._write_log(email, text)
+
     def _write_log(self, email, text):
-        line = f"[{datetime.now():%H:%M:%S}] {email}: {text}"
+        stamp = f"[{datetime.now():%H:%M:%S}]"
+        line = f"{stamp} {email}: {text}"
         self.log.appendPlainText(line)
+        if email and "@" in str(email):
+            self._log_view(email).appendPlainText(f"{stamp} {text}")
         try:
             self._logfile.write(line + "\n")
             self._logfile.flush()
@@ -423,7 +721,10 @@ class MainWindow(QMainWindow):
         if acc_id in self.state:
             self.state[acc_id].update(status=msg, kind=kind)
             self._update_row(acc_id)
-        self._write_log(self._email(acc_id), msg)
+        email = self._email(acc_id)
+        self._write_log(email, msg)
+        self._log_kind[email.strip().lower()] = kind
+        self._color_log_tab(email)
         self._sync_actions()
         if not self.running:
             QApplication.alert(self)
@@ -471,15 +772,31 @@ class MainWindow(QMainWindow):
 
     # ================= закрытие =================
     def closeEvent(self, e):
-        if self.running:
+        busy_exports = [d for d in self._exports if d.busy()]
+        if self.running or busy_exports:
+            what = []
+            if self.running:
+                what.append("загрузка почты")
+            if busy_exports:
+                what.append("экспорт в PST")
             if QMessageBox.question(self, "Выход",
-                                    "Идёт загрузка почты. Остановить и выйти?\n"
+                                    f"Сейчас идёт {' и '.join(what)}. Остановить и выйти?\n"
                                     "Уже скачанные письма сохранятся, при следующем запуске "
-                                    "загрузка продолжится.") != QMessageBox.StandardButton.Yes:
+                                    "загрузка продолжится. Уже записанные в PST письма "
+                                    "останутся в файле.") != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
             for stop in self.running.values():
                 stop.set()
+            for d in busy_exports:
+                d.stop_and_close()
+            # PST-файл нужно корректно дописать, иначе он будет повреждён
+            self.statusBar().showMessage("Завершаю экспорт: дописываю структуру PST-файлов…")
+            while any(d.busy() for d in busy_exports):
+                QApplication.processEvents()
+                time.sleep(0.05)
+        for d in list(self._exports):
+            d.close()
         self.cfg.save()
         self._logfile.close()
         e.accept()

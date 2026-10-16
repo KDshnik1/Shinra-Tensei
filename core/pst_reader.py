@@ -2,7 +2,7 @@
 подписи, B-деревья, heap/BTH/PC/TC. Используется для самопроверки после экспорта."""
 import struct
 
-from .pst_writer import pst_crc, _sig, FIRST_AMAP, REGION
+from .pst_writer import pst_crc, _sig, FIRST_AMAP, REGION, region_pages, mark_bits
 
 
 class PstCheckError(Exception):
@@ -29,11 +29,13 @@ class PstReader:
         _chk((self.eof - FIRST_AMAP) % REGION == 0, "конец файла не на границе AMap")
         self.rgnid = struct.unpack_from("<32I", h, 44)
         self.bbt, self.nbt = {}, {}
+        self.pages = []
         self._walk(bbt_ib, bbt_bid, 0x80, self.bbt)
         self._walk(nbt_ib, nbt_bid, 0x81, self.nbt)
         self._check_amaps()
 
     def _page(self, ib, bid, ptype):
+        self.pages.append(ib)
         self.f.seek(ib)
         p = self.f.read(512)
         t, t2, sig, crc, pbid = struct.unpack_from("<BBHIQ", p, 496)
@@ -63,21 +65,38 @@ class PstReader:
                 out[n] = (d, s, par)
 
     def _check_amaps(self):
-        k = 0
-        while FIRST_AMAP + k * REGION < self.eof:
-            ib = FIRST_AMAP + k * REGION
-            self.f.seek(ib)
+        """Служебные страницы на своих местах, и AMap покрывает их и все блоки."""
+        nreg = (self.eof - FIRST_AMAP) // REGION
+        actual = bytearray(nreg * 496)
+        expect = bytearray(nreg * 496)
+        names = {1: (0x83, "PMap"), 2: (0x82, "FMap"), 3: (0x85, "FPMap")}
+        for k in range(nreg):
+            start = FIRST_AMAP + k * REGION
+            self.f.seek(start)
             p = self.f.read(512)
-            _chk(p[496] == 0x84, f"нет AMap @{ib:#x}")
-            _chk(struct.unpack_from("<I", p, 500)[0] == pst_crc(p[:496]), f"CRC AMap @{ib:#x}")
-            _chk(p[0] & 0x80, f"AMap @{ib:#x} не помечает саму себя")
-            k += 1
-        for bid, (ib, cb) in self.bbt.items():
-            k, off = divmod(ib - FIRST_AMAP, REGION)
-            self.f.seek(FIRST_AMAP + k * REGION)
-            amap = self.f.read(496)
-            for u in range(off // 64, (off + cb + 16 + 63) // 64):
-                _chk(amap[u >> 3] & (0x80 >> (u & 7)), f"блок {bid:#x} не отмечен в AMap")
+            _chk(p[496] == 0x84, f"нет AMap @{start:#x}")
+            _chk(struct.unpack_from("<I", p, 500)[0] == pst_crc(p[:496]), f"CRC AMap @{start:#x}")
+            actual[k * 496:(k + 1) * 496] = p[:496]
+            for pg in region_pages(k):
+                base = k * REGION // 64 + pg * 8
+                mark_bits(expect, base, base + 8)
+                if pg:
+                    ptype, name = names[pg]
+                    self.f.seek(start + pg * 512)
+                    q = self.f.read(512)
+                    _chk(q[496] == ptype and q[497] == ptype, f"нет {name} @{start + pg * 512:#x}")
+                    _chk(struct.unpack_from("<I", q, 500)[0] == pst_crc(q[:496]),
+                         f"CRC {name} @{start + pg * 512:#x}")
+        for ib, cb in self.bbt.values():
+            a = (ib - FIRST_AMAP) // 64
+            mark_bits(expect, a, a + (cb + 16 + 63) // 64)
+        for ib in self.pages:
+            a = (ib - FIRST_AMAP) // 64
+            mark_bits(expect, a, a + 8)
+        for k in range(nreg):
+            e = int.from_bytes(expect[k * 496:(k + 1) * 496], "big")
+            a = int.from_bytes(actual[k * 496:(k + 1) * 496], "big")
+            _chk(e & ~a == 0, f"AMap @{FIRST_AMAP + k * REGION:#x} не отмечает занятые данные")
 
     # ---------- блоки и узлы ----------
     def block(self, bid):

@@ -6,34 +6,56 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QGroupBox, QHBoxLayout,
-                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QGroupBox,
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                               QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+                               QVBoxLayout)
 
-from core.pst_export import check_password, export_mailbox
+from core.pst_export import (MAX_SPLIT_GB, MIN_SPLIT_GB, check_password, collect_tasks,
+                             export_mailbox)
 from core.storage import MailboxArchive, safe_name
+from .common import fmt_num, set_progress
 
 
 class _Bridge(QObject):
     log = Signal(str)
-    progress = Signal(int, int)
+    progress = Signal(int, int)          # текущий ящик: экспортировано, всего
+    overall = Signal(int, int)           # все выбранные ящики
     current = Signal(str)
     done = Signal(object)
+    mailbox_log = Signal(str, str)       # (e-mail, строка) — в журнал главного окна
 
 
 class ExportDialog(QDialog):
-    def __init__(self, parent, cfg):
-        super().__init__(parent)
+    """Отдельное (немодальное) окно: главное окно программы остаётся доступным."""
+    closed = Signal(object)
+
+    def __init__(self, parent, cfg, preselect=None, log_sink=None):
+        """preselect — список e-mail, которые отметить; None — все ящики с письмами.
+        log_sink(email, text) — куда дублировать журнал (вкладки главного окна)."""
+        super().__init__(None)              # без владельца: своё окно на панели задач
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowMinimizeButtonHint |
+                            Qt.WindowType.WindowMaximizeButtonHint |
+                            Qt.WindowType.WindowCloseButtonHint)
         self.cfg = cfg
+        self._close_after = False
+        self._last_reports = []
+        self.preselect = {e.strip().lower() for e in preselect} if preselect else None
         self.setWindowTitle("Экспорт в Outlook PST")
-        self.resize(680, 680)
+        self.resize(700, 720)
         self.stop = threading.Event()
         self.thread = None
+        self._running_emails = []
         self.bridge = _Bridge()
         self.bridge.log.connect(self._log)
-        self.bridge.progress.connect(self._progress)
+        self.bridge.progress.connect(
+            lambda d, t: set_progress(self.pb, d, t, "Экспортировано писем: "))
+        self.bridge.overall.connect(
+            lambda d, t: set_progress(self.pb_total, d, t, "Всего: "))
         self.bridge.current.connect(lambda t: self.lbl_cur.setText(t))
         self.bridge.done.connect(self._finished)
+        if log_sink:
+            self.bridge.mailbox_log.connect(log_sink)
         self._build()
 
     def _build(self):
@@ -42,16 +64,25 @@ class ExportDialog(QDialog):
         v = QVBoxLayout(g)
         self.lst = QListWidget()
         for a in self.cfg.accounts:
-            arch = MailboxArchive(self.cfg.archive_dir, a.email)
-            has = (arch.dir / MailboxArchive.META).exists()
+            has = (self.cfg.mailbox_dir(a) / MailboxArchive.META).exists()
             it = QListWidgetItem(a.email + ("" if has else "   (нет загруженных писем)"))
             it.setData(Qt.ItemDataRole.UserRole, a.email)
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(Qt.CheckState.Checked if has else Qt.CheckState.Unchecked)
+            wanted = has and (self.preselect is None or a.email.strip().lower() in self.preselect)
+            it.setCheckState(Qt.CheckState.Checked if wanted else Qt.CheckState.Unchecked)
             if not has:
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.lst.addItem(it)
         v.addWidget(self.lst)
+        h = QHBoxLayout()
+        b_all = QPushButton("Отметить все")
+        b_all.clicked.connect(lambda: self._check_all(True))
+        b_none = QPushButton("Снять все")
+        b_none.clicked.connect(lambda: self._check_all(False))
+        h.addWidget(b_all)
+        h.addWidget(b_none)
+        h.addStretch()
+        v.addLayout(h)
         lay.addWidget(g)
 
         g = QGroupBox("Куда сохранить")
@@ -64,11 +95,24 @@ class ExportDialog(QDialog):
         b.clicked.connect(self._browse)
         h.addWidget(b)
         v.addLayout(h)
-        info = QLabel("Для каждого ящика создаётся отдельный файл <e-mail>.pst. Файл собирается "
-                      "самой программой — Outlook не нужен. Ящики больше ~1,9 ГБ "
-                      "автоматически делятся на части.")
-        info.setWordWrap(True)
-        v.addWidget(info)
+        h = QHBoxLayout()
+        h.addWidget(QLabel("Размер одной части PST:"))
+        self.sp_split = QDoubleSpinBox()
+        self.sp_split.setRange(MIN_SPLIT_GB, MAX_SPLIT_GB)
+        self.sp_split.setDecimals(1)
+        self.sp_split.setSingleStep(1.0)
+        self.sp_split.setSuffix(" ГБ")
+        self.sp_split.setValue(min(max(float(self.cfg.split_gb), MIN_SPLIT_GB), MAX_SPLIT_GB))
+        self.sp_split.setToolTip(f"От {MIN_SPLIT_GB:g} до {MAX_SPLIT_GB:g} ГБ (предел Outlook "
+                                 f"для одного файла — 50 ГБ)".replace(".", ","))
+        self.sp_split.valueChanged.connect(self._split_changed)
+        h.addWidget(self.sp_split)
+        h.addStretch()
+        v.addLayout(h)
+        self.lbl_info = QLabel()
+        self.lbl_info.setWordWrap(True)
+        v.addWidget(self.lbl_info)
+        self._split_changed(self.sp_split.value())
         lay.addWidget(g)
 
         g = QGroupBox("Защита паролем")
@@ -93,10 +137,23 @@ class ExportDialog(QDialog):
         lay.addWidget(g)
         self._sync_pw()
 
-        self.lbl_cur = QLabel()
-        lay.addWidget(self.lbl_cur)
+        g = QGroupBox("Ход экспорта")
+        v = QVBoxLayout(g)
+        self.lbl_cur = QLabel("Отметьте ящики и нажмите «Экспортировать»")
+        self.lbl_cur.setWordWrap(True)
+        v.addWidget(self.lbl_cur)
+        v.addWidget(QLabel("Текущий ящик:"))
         self.pb = QProgressBar()
-        lay.addWidget(self.pb)
+        self.pb.setTextVisible(True)
+        set_progress(self.pb, 0, 0, "Экспортировано писем: ")
+        v.addWidget(self.pb)
+        v.addWidget(QLabel("Все выбранные ящики:"))
+        self.pb_total = QProgressBar()
+        self.pb_total.setTextVisible(True)
+        set_progress(self.pb_total, 0, 0, "Всего: ")
+        v.addWidget(self.pb_total)
+        lay.addWidget(g)
+
         self.log = QPlainTextEdit(readOnly=True)
         lay.addWidget(self.log, 1)
 
@@ -104,6 +161,11 @@ class ExportDialog(QDialog):
         self.btn_folder = QPushButton("Открыть папку с PST")
         self.btn_folder.clicked.connect(self._open_folder)
         h.addWidget(self.btn_folder)
+        self.btn_report = QPushButton("Открыть отчёт")
+        self.btn_report.setToolTip("Какие папки и за какие даты попали в каждую часть PST")
+        self.btn_report.setEnabled(False)
+        self.btn_report.clicked.connect(self._open_report)
+        h.addWidget(self.btn_report)
         h.addStretch()
         self.btn_start = QPushButton("Экспортировать")
         self.btn_start.setObjectName("Primary")
@@ -116,6 +178,34 @@ class ExportDialog(QDialog):
         for w in (self.btn_start, self.btn_stop, self.btn_close):
             h.addWidget(w)
         lay.addLayout(h)
+
+    def _split_changed(self, v):
+        gb = f"{v:g}".replace(".", ",")
+        self.lbl_info.setText(
+            f"Для каждого ящика создаётся отдельный файл <e-mail>.pst. Файл собирается самой "
+            f"программой — Outlook не нужен. Если ящик больше {gb} ГБ, он делится на части "
+            f"(_часть2.pst, _часть3.pst…). Рядом сохраняется отчёт: какие папки и за какие "
+            f"даты лежат в каждой части.")
+
+    def busy(self) -> bool:
+        return bool(self.thread and self.thread.is_alive())
+
+    def exporting(self) -> set:
+        return set(self._running_emails) if self.busy() else set()
+
+    def _open_report(self):
+        if not self._last_reports or not hasattr(os, "startfile"):
+            return
+        if len(self._last_reports) == 1:
+            os.startfile(str(self._last_reports[0]))
+        else:
+            os.startfile(str(self._last_reports[0].parent))
+
+    def _check_all(self, on: bool):
+        for i in range(self.lst.count()):
+            it = self.lst.item(i)
+            if it.flags() & Qt.ItemFlag.ItemIsEnabled:
+                it.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
 
     def _sync_pw(self):
         on = self.chk_pw.isChecked()
@@ -135,11 +225,6 @@ class ExportDialog(QDialog):
 
     def _log(self, t):
         self.log.appendPlainText(f"[{datetime.now():%H:%M:%S}] {t}")
-
-    def _progress(self, done, total):
-        self.pb.setRange(0, max(total, 1))
-        self.pb.setValue(done)
-        self.pb.setFormat(f"{done} / {total}")
 
     def _start(self):
         emails = [self.lst.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lst.count())
@@ -162,53 +247,118 @@ class ExportDialog(QDialog):
                 return
         out = Path(self.ed_out.text().strip())
         self.cfg.pst_dir = str(out)
+        self.cfg.split_gb = self.sp_split.value()
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
+        self._running_emails = list(emails)
+        self._last_reports = []
+        self.btn_report.setEnabled(False)
+        self.sp_split.setEnabled(False)
         self.stop.clear()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.thread = threading.Thread(target=self._worker, args=(emails, out, password),
+        set_progress(self.pb, 0, 0, "Экспортировано писем: ")
+        set_progress(self.pb_total, 0, 0, "Всего: ")
+        self.thread = threading.Thread(target=self._worker,
+                                       args=(emails, out, password, self.sp_split.value()),
                                        daemon=True)
         self.thread.start()
 
-    def _worker(self, emails, out: Path, password):
+    def _worker(self, emails, out: Path, password, split_gb):
         b = self.bridge
+        b.current.emit("Подсчёт писем…")
+        counts = {}
+        for email in emails:
+            try:
+                counts[email] = sum(len(t[2]) for t in
+                                    collect_tasks(self.cfg.mailbox_dir_by_email(email)))
+            except Exception:
+                counts[email] = 0
+        grand = sum(counts.values())
+        b.overall.emit(0, grand)
+        b.log.emit(f"К экспорту: {fmt_num(grand)} писем в {len(emails)} ящ.")
+
+        state = {"base": 0, "email": ""}
 
         class CB:
-            log = b.log.emit
-            progress = b.progress.emit
+            @staticmethod
+            def log(text):
+                b.log.emit(text)
+                if state["email"]:
+                    b.mailbox_log.emit(state["email"], "[PST] " + text)
+
+            @staticmethod
+            def progress(done, total):
+                b.progress.emit(done, total)
+                b.overall.emit(state["base"] + done, grand)
+
+            @staticmethod
+            def stage(text):
+                b.current.emit(f"{state['email']}: {text}")
+
         results = []
         for email in emails:
             if self.stop.is_set():
                 break
-            arch = MailboxArchive(self.cfg.archive_dir, email)
+            state["email"] = email
+            mdir = self.cfg.mailbox_dir_by_email(email)
             pst = out / f"{safe_name(email, 100)}.pst"
             if pst.exists():
                 pst = out / f"{safe_name(email, 100)}_{datetime.now():%Y%m%d_%H%M%S}.pst"
             b.current.emit(f"Экспорт: {email} → {pst.name}")
-            b.log.emit(f"=== {email} → {pst}")
+            CB.log(f"=== Экспорт в {pst}")
             try:
-                ok, err, files = export_mailbox(arch.dir, pst, email, CB, self.stop, password)
-                b.log.emit(f"{email}: записано писем {ok}, ошибок {err}, файлов {len(files)}")
-                results.append((email, ok, err))
+                ok, err, files, report = export_mailbox(mdir, pst, email, CB, self.stop,
+                                                        password, split_gb)
+                CB.log(f"Готово: записано писем {fmt_num(ok)}, ошибок {err}, "
+                       f"файлов PST: {len(files)}")
+                results.append((email, ok, err, report))
             except Exception as e:
-                b.log.emit(f"{email}: ОШИБКА — {e}")
+                CB.log(f"ОШИБКА — {e}")
                 b.log.emit(traceback.format_exc())
-                results.append((email, 0, -1))
+                results.append((email, 0, -1, None))
+            state["base"] += counts.get(email, 0)
+            b.overall.emit(min(state["base"], grand), grand)
         b.done.emit(results)
 
     def _finished(self, results):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.sp_split.setEnabled(True)
+        self._last_reports = [r[3] for r in results if r[3]]
+        self.btn_report.setEnabled(bool(self._last_reports))
+        if self._close_after:
+            self.close()
+            return
         if self.stop.is_set():
             self.lbl_cur.setText("Экспорт остановлен")
             return
+        total_ok = sum(max(r[1], 0) for r in results)
         bad = [r for r in results if r[2] != 0]
-        self.lbl_cur.setText("Экспорт завершён" + (" с ошибками — см. журнал" if bad else ""))
+        self.lbl_cur.setText(f"Экспорт завершён: {fmt_num(total_ok)} писем"
+                             + (" — есть ошибки, см. журнал" if bad else ""))
+
+    def stop_and_close(self):
+        """Остановить экспорт; окно закроется, когда текущая часть PST будет дописана."""
+        self._close_after = True
+        self.stop.set()
+        self.btn_stop.setEnabled(False)
+        self.lbl_cur.setText("Остановка: дописываю структуру текущего файла PST…")
+        if not self.busy():
+            self.close()
 
     def closeEvent(self, e):
-        if self.thread and self.thread.is_alive():
-            if QMessageBox.question(self, "Экспорт", "Экспорт ещё идёт. Остановить?") \
-                    != QMessageBox.StandardButton.Yes:
-                e.ignore()
-                return
-            self.stop.set()
+        if self.busy():
+            if not self._close_after:
+                if QMessageBox.question(self, "Экспорт", "Экспорт ещё идёт. Остановить?\n"
+                                        "Уже записанные письма останутся в PST-файле.") \
+                        != QMessageBox.StandardButton.Yes:
+                    e.ignore()
+                    return
+                self.stop_and_close()
+            e.ignore()                       # закроемся сами, когда поток завершится
+            return
         e.accept()
+        self.closed.emit(self)

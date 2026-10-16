@@ -1,8 +1,8 @@
-"""Локальный архив: каждое письмо — отдельный .eml.
+"""Локальный архив: каждое письмо — отдельный .eml или сжатый .eml.gz.
 
 Структура:
   <архив>/<email>/folders.json                 — соответствие папок диска и сервера
-  <архив>/<email>/<Папка>/<Подпапка>/<uidvalidity>_<uid>.eml
+  <архив>/<email>/<Папка>/<Подпапка>/<uidvalidity>_<uid>.eml[.gz]
   <архив>/<email>/<Папка>/flags.txt            — флаги писем (прочитано и т.п.)
 
 Повторный запуск докачивает только новые письма.
@@ -12,6 +12,8 @@ import os
 import threading
 import time
 from pathlib import Path
+
+from . import msgfile
 
 _INVALID = '<>:"/\\|?*'
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
@@ -63,22 +65,18 @@ class MailboxArchive:
         return d
 
     @staticmethod
-    def message_path(fdir: Path, uidvalidity: str, uid: str) -> Path:
-        return fdir / f"{uidvalidity}_{uid}.eml"
+    def message_key(uidvalidity: str, uid: str) -> str:
+        return f"{uidvalidity}_{uid}"
 
     def save_message(self, fdir: Path, uidvalidity: str, uid: str,
-                     body: bytes, flags: str, idate):
-        path = self.message_path(fdir, uidvalidity, uid)
-        tmp = path.with_name(path.name + ".part")
-        with open(tmp, "wb") as fh:
-            fh.write(body)
-        os.replace(tmp, path)
+                     body: bytes, flags: str, idate, compress: bool = False):
+        ts = None
         if idate:
             try:
                 ts = time.mktime(idate)
-                os.utime(path, (ts, ts))
             except Exception:
-                pass
+                ts = None
+        msgfile.write_message(fdir / self.message_key(uidvalidity, uid), body, compress, ts)
         with open(fdir / "flags.txt", "a", encoding="utf-8") as fh:
             fh.write(f"{uidvalidity}_{uid}\t{flags}\n")
 
