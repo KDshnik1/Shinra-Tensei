@@ -7,6 +7,85 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.10.1] — 2026-10-16
+
+### Fixed
+- **Message received dates.** In the PST and the export report every message showed the day the
+  archive was downloaded instead of the day it was received: the date came only from the message
+  file's timestamp, which stays at the download time when the server sends INTERNALDATE in a form
+  `imaplib` does not understand. The received date now comes from the top Received header (added by
+  the mail server on delivery), from Date for sent messages and drafts, and from the file timestamp
+  only when neither exists. There is no need to download the archive again; just export it again.
+  The viewer rebuilds its index and shows the right dates too.
+- INTERNALDATE is parsed more leniently (single-digit day, any letter case in the month), and when
+  the server sends none, the file timestamp is taken from the message headers.
+- A message with thousands of nested parts (multiparts or forwarded messages inside each other)
+  crashed the whole app when exporting with the native core: the stack overflowed. Parts nested
+  deeper than 100 levels are no longer parsed and the rest is kept as is. The Python code failed on
+  such a message and skipped it; now it is exported with its headers.
+- The self-check of a damaged PST could recurse forever (a cycle in the block or folder tree), and
+  the Python code crashed with `IndexError`, `struct.error` and so on, aborting the export after the
+  files were written. Any damage now gives a normal self-check message ("damaged file structure",
+  "data is truncated"…). Both versions were tested on 7,500 corrupted files and give the same
+  verdicts.
+- If the next PST part could not be created after the previous one was closed (for example, the
+  disk was full), the Python code deleted the finished part.
+- Message text without a declared charset in Windows-1251 or KOI8-R turned into "�����". The
+  encoding is now detected the same way as for headers: UTF-8, Windows-1251, KOI8-R.
+- Messages with an 8-bit Message-ID, a null byte in the charset name or broken Content-Type
+  parameters (which crash Python's header parser) were left out of the PST. The Python code now
+  parses messages in compat32 mode, which is sturdier and almost twice as fast (the test mailbox
+  exports in 13 s instead of 24 s).
+- A subject or name with broken base64 in an encoded word (`=?utf-8?B?…***?=`) turned into
+  gibberish. Such a header is now shown as is.
+- An attachment name with a path (`C:\dir\file.txt`) went into the PST whole; now only the file
+  name does.
+- Attachment names in raw Windows-1251 are now read correctly by the Python code too.
+- Strings with invalid characters (lone UTF-16 surrogates) no longer stop the PST from being
+  written; such characters are replaced with "?".
+- An internal error in the native core no longer aborts the export: the message counts as an error
+  and the export goes on.
+- The Python self-check no longer builds the text of every possible error message in advance
+  (millions of needless translation calls on a large file).
+
+## [0.10.0] — 2026-10-16
+
+### Added
+- **Native core in Rust** (`native/`, optional). PST export parses `.eml` files, writes the PST and
+  runs the self-check in Rust. A 3,000-message test mailbox (200 MB) exports in 1.9 s instead of
+  25 s. The heavy work runs without the GIL, so two exports at once now give 1.7× the throughput
+  instead of slowing each other down.
+- The PST files are byte-for-byte identical to the Python writer's. The self-check gives the same
+  verdicts, including on deliberately corrupted files.
+- `native/check.py` compares both versions on a real mailbox.
+- `SHINRA_PURE_PYTHON=1` forces the pure-Python code.
+
+### Changed
+- Forwarded messages (`message/rfc822` attachments) are exported with their original bytes. The
+  Python code rebuilt them, which refolded headers.
+- Attachment names written in raw Windows-1251 without encoding are now read correctly
+  ("Счёт.txt" instead of "����.txt").
+
+## [0.9.0] — 2026-10-16
+
+### Added
+- **English interface.** Switch in the toolbar: "Язык / Language" → Русский / English. The change is
+  applied after a restart, which the app offers to do right away (unless a download or export is
+  running). On first start the language follows Windows.
+- In English mode the whole app is translated: windows, menus, tooltips, statuses, logs, error
+  messages, PST self-check messages and the export report (`<e-mail>_report.txt`, parts named
+  `_part2.pst`…). PST folders are named "Inbox" and "Deleted Items".
+- Language-specific formats: dates `2026-10-16` / `16.10.2026`, numbers `1,234` / `1 234`,
+  decimals `2.5` / `2,5`.
+- In Russian mode Qt's own Russian translation is loaded when available, so standard dialog buttons
+  ("Да", "Нет", "Отмена") are in Russian too.
+
+### Changed
+- All interface texts are now looked up through `tr()`; translations live in `core/lang_en.py`.
+- The export report aligns its columns for any language.
+
+---
+
 ## [0.8.0] — 2026-10-16
 
 ### Added

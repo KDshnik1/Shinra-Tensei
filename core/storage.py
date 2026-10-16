@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import msgfile
+from . import mailparse, msgfile
 
 _INVALID = '<>:"/\\|?*'
 _RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
@@ -73,9 +73,12 @@ class MailboxArchive:
         ts = None
         if idate:
             try:
-                ts = time.mktime(idate)
+                ts = float(idate) if isinstance(idate, (int, float)) else time.mktime(idate)
             except Exception:
                 ts = None
+        if ts is None:
+            # сервер не дал INTERNALDATE: дата из заголовков, а не момент загрузки
+            ts = mailparse.received_from_bytes(body)
         msgfile.write_message(fdir / self.message_key(uidvalidity, uid), body, compress, ts)
         with open(fdir / "flags.txt", "a", encoding="utf-8") as fh:
             fh.write(f"{uidvalidity}_{uid}\t{flags}\n")

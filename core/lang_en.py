@@ -687,4 +687,16 @@ EN = {
         'To',
     'От':
         'From',
+    'данные обрезаны':
+        'data is truncated',
+    'узел {nid:#x} отсутствует в NBT':
+        'node {nid:#x} is missing from the NBT',
+    'строка не в UTF-16':
+        'string is not valid UTF-16',
+    'повреждённая структура файла':
+        'damaged file structure',
+    'не удалось разобрать письмо (внутренняя ошибка)':
+        'could not parse the message (internal error)',
+    'внутренняя ошибка при записи письма':
+        'internal error while writing the message',
 }

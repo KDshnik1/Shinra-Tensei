@@ -1,0 +1,25 @@
+[package]
+name = "shinra_core"
+version = "0.1.0"
+edition = "2024"
+description = "Native core of Shinra Tensei: PST writer and .eml parser"
+license = "MIT"
+
+[lib]
+name = "shinra_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.23.1"
+crc32fast = "1.5.2"
+encoding_rs = "0.8.42"
+flate2 = "1.1.10"
+getrandom = "0.3"
+htmlize = { version = "1.1.0", features = ["unescape"] }
+memchr = "2.8.3"
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"] }
+regex = "1.13.1"
+
+[profile.release]
+lto = true
+codegen-units = 1

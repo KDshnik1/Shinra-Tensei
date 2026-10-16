@@ -3,6 +3,9 @@
 Основной движок — встроенный (core/pst_writer.py): PST-файл собирается
 программой по спецификации [MS-PST]. Outlook не нужен ни запущенный,
 ни установленный. После записи файл проверяется независимым читателем.
+
+Если собран нативный модуль shinra_core (Rust, папка native/), письма
+разбираются и записываются им — тот же результат, но в разы быстрее.
 """
 import email.utils
 import html as html_mod
@@ -13,8 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import mailparse, msgfile
-from .pst_reader import PstCheckError, verify
-from .pst_writer import NID_IPM_SUBTREE, PstFile, filetime
+from .pst_reader import verify
+from .pst_writer import NATIVE, NID_IPM_SUBTREE, PstFile, filetime
 from .storage import load_flags, safe_name
 from .i18n import DATE_FMT, DATETIME_FMT, dec, num, tr
 
@@ -128,7 +131,8 @@ def eml_to_message(eml: Path, read: bool) -> dict:
         row = {0x0E200003: len(a.data), 0x3704001F: short, 0x37050003: 1,
                0x370B0003: 0xFFFFFFFF}
         attachments.append({"props": ap, "row": row})
-    return {"props": props, "recipients": recipients, "attachments": attachments, "read": read}
+    return {"props": props, "recipients": recipients, "attachments": attachments, "read": read,
+            "received": info["received"]}
 
 
 def _pst_folder_name(seg: str, top_level: bool) -> str:
@@ -257,6 +261,7 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
 
     def close_part():
         state["pst"].close()
+        state["pst"] = None         # закрытую часть abort() уже не трогает
         p = parts[-1]
         p.size = p.path.stat().st_size
         if p.size > split_bytes:
@@ -307,9 +312,15 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
                     open_part()
                 try:
                     read = "\\seen" in flags.get(msgfile.msg_key(eml), "").lower()
-                    state["pst"].add_message(folder_nid(segs), eml_to_message(eml, read))
+                    if NATIVE:
+                        received = state["pst"].add_eml(folder_nid(segs), eml, read)
+                    else:
+                        msg = eml_to_message(eml, read)
+                        state["pst"].add_message(folder_nid(segs), msg)
+                        received = msg["received"]
                     state["raw"] += raw
-                    parts[-1].add(label, st.st_mtime if st else 0)
+                    # в отчёт — та же дата получения, что записана в PST
+                    parts[-1].add(label, received or (st.st_mtime if st else 0))
                     ok += 1
                 except Exception as e:
                     errors += 1
@@ -320,7 +331,8 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
         cb.log(tr('Запись структуры PST…'))
         close_part()
     except BaseException:
-        state["pst"].abort()
+        if state.get("pst") is not None:
+            state["pst"].abort()
         raise
 
     for path in files:
@@ -331,7 +343,7 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
             n = sum(v for k, v in summary.items() if not k.startswith("_"))
             cb.log(tr('Проверка пройдена: {0} писем, структура PST корректна').format(_fmt_n(n))
                    + (tr(', установлен пароль') if summary["_password"] else ""))
-        except PstCheckError as e:
+        except Exception as e:      # PstCheckError, а также ошибки чтения файла
             errors += 1
             cb.log(tr('ВНИМАНИЕ: самопроверка файла {0} не пройдена: {e}').format(path.name, e=e))
 
