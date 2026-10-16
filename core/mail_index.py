@@ -8,7 +8,7 @@ from .mailparse import summarize
 from .storage import MailboxArchive
 from .i18n import tr
 
-INDEX_VERSION = 4          # 4: сжатые письма .eml.gz, размер файла отдельно
+INDEX_VERSION = 5          # 5: дата получения по заголовкам Received/Date
 
 
 def list_mailboxes(archive_root) -> list[tuple[str, Path]]:

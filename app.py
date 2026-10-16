@@ -10,7 +10,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QLibraryInfo, QLocale, QObject, Qt, QTranslator, Signal
 from PySide6.QtGui import QAction, QColor, QCursor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout,
                                QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
@@ -27,9 +27,11 @@ from gui import theme
 from gui.common import progress_text, run_bg, set_progress
 from gui.export_dialog import ExportDialog
 from gui.viewer import ViewerWindow
+from core import i18n
+from core.i18n import tr
 
-COLS = ["", "E-mail", "Сервер", "Период", "Папки", "Статус", "Прогресс",
-        "Загружено", "Уже в архиве", "Ошибки"]
+COLS = ["", "E-mail", tr('Сервер'), tr('Период'), tr('Папки'), tr('Статус'), tr('Прогресс'),
+        tr('Загружено'), tr('Уже в архиве'), tr('Ошибки')]
 C_CHECK, C_EMAIL = 0, 1
 C_STATUS, C_PROGRESS, C_DL, C_ALREADY, C_ERR = 5, 6, 7, 8, 9
 
@@ -64,14 +66,14 @@ def _same_path(a, b) -> bool:
 
 
 def new_state():
-    return {"status": "Ожидание", "kind": "idle", "done": 0, "total": 0,
+    return {"status": tr('Ожидание'), "kind": "idle", "done": 0, "total": 0,
             "downloaded": 0, "already": 0, "errors": 0}
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME} — архивация почты IMAP и экспорт в PST")
+        self.setWindowTitle(tr('{APP_NAME} — архивация почты IMAP и экспорт в PST').format(APP_NAME=APP_NAME))
         self.resize(1250, 760)
         self.cfg = Config()
         self.cfg.load()
@@ -120,7 +122,7 @@ class MainWindow(QMainWindow):
         bl = QVBoxLayout(banner)
         bl.setContentsMargins(18, 12, 18, 12)
         bl.addWidget(QLabel(APP_NAME, objectName="BannerTitle"))
-        bl.addWidget(QLabel("Архивация почты: одновременная загрузка нескольких IMAP-ящиков и экспорт в Outlook PST",
+        bl.addWidget(QLabel(tr('Архивация почты: одновременная загрузка нескольких IMAP-ящиков и экспорт в Outlook PST'),
                             objectName="BannerSub"))
         lay.addWidget(banner)
 
@@ -137,31 +139,31 @@ class MainWindow(QMainWindow):
             tb.addAction(a)
             return a
         SP = QStyle.StandardPixmap
-        self.a_add = act("Добавить ящик", SP.SP_FileDialogNewFolder, self._add)
-        self.a_edit = act("Изменить", SP.SP_FileDialogDetailedView, self._edit,
-                          "Изменить выделенный ящик")
-        self.a_dup = act("Копировать", SP.SP_FileDialogListView, self._duplicate,
-                         "Создать ящик на основе выбранного (тот же сервер и настройки)")
-        self.a_del = act("Удалить", SP.SP_TrashIcon, self._delete,
-                         "Удалить отмеченные ящики (или выделенный, если галочек нет)")
+        self.a_add = act(tr('Добавить ящик'), SP.SP_FileDialogNewFolder, self._add)
+        self.a_edit = act(tr('Изменить'), SP.SP_FileDialogDetailedView, self._edit,
+                          tr('Изменить выделенный ящик'))
+        self.a_dup = act(tr('Копировать'), SP.SP_FileDialogListView, self._duplicate,
+                         tr('Создать ящик на основе выбранного (тот же сервер и настройки)'))
+        self.a_del = act(tr('Удалить'), SP.SP_TrashIcon, self._delete,
+                         tr('Удалить отмеченные ящики (или выделенный, если галочек нет)'))
         tb.addSeparator()
-        self.a_run_sel = act("Запустить выбранные", SP.SP_MediaPlay, self._run_selected,
-                             "Запустить загрузку отмеченных ящиков (или выделенного)")
-        self.a_run_all = act("Запустить все", SP.SP_MediaSeekForward, self._run_all)
-        self.a_stop = act("Остановить", SP.SP_MediaStop, self._stop_selected,
-                          "Остановить отмеченные/выделенные (если таких нет — все)")
+        self.a_run_sel = act(tr('Запустить выбранные'), SP.SP_MediaPlay, self._run_selected,
+                             tr('Запустить загрузку отмеченных ящиков (или выделенного)'))
+        self.a_run_all = act(tr('Запустить все'), SP.SP_MediaSeekForward, self._run_all)
+        self.a_stop = act(tr('Остановить'), SP.SP_MediaStop, self._stop_selected,
+                          tr('Остановить отмеченные/выделенные (если таких нет — все)'))
         tb.addSeparator()
-        self.a_view = act("Просмотр писем", SP.SP_FileDialogContentsView, self._view,
-                          "Просмотреть скачанные письма (выбранного ящика или всех)")
-        self.a_export = act("Экспорт в PST", SP.SP_DialogSaveButton, self._export,
-                            "Экспорт в PST (отмеченные ящики будут выбраны заранее)")
-        self.a_open = act("Открыть архив", SP.SP_DirOpenIcon, self._open_archive)
-        self.a_arch = act("Папка архива…", SP.SP_DriveHDIcon, self._choose_archive)
+        self.a_view = act(tr('Просмотр писем'), SP.SP_FileDialogContentsView, self._view,
+                          tr('Просмотреть скачанные письма (выбранного ящика или всех)'))
+        self.a_export = act(tr('Экспорт в PST'), SP.SP_DialogSaveButton, self._export,
+                            tr('Экспорт в PST (отмеченные ящики будут выбраны заранее)'))
+        self.a_open = act(tr('Открыть архив'), SP.SP_DirOpenIcon, self._open_archive)
+        self.a_arch = act(tr('Папка архива…'), SP.SP_DriveHDIcon, self._choose_archive)
 
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
-        tb.addWidget(QLabel("Тема: "))
+        tb.addWidget(QLabel(tr('Тема: ')))
         self.cb_theme = QComboBox()
         for text, val in theme.THEME_MODES:
             self.cb_theme.addItem(text, val)
@@ -169,7 +171,15 @@ class MainWindow(QMainWindow):
         self.cb_theme.currentIndexChanged.connect(self._theme_changed)
         tb.addWidget(self.cb_theme)
         tb.addSeparator()
-        tb.addWidget(QLabel(" Одновременно ящиков: "))
+        tb.addWidget(QLabel(" Язык / Language: "))
+        self.cb_lang = QComboBox()
+        for code, name in i18n.LANGUAGES:
+            self.cb_lang.addItem(name, code)
+        self.cb_lang.setCurrentIndex(max(self.cb_lang.findData(i18n.LANG), 0))
+        self.cb_lang.currentIndexChanged.connect(self._language_changed)
+        tb.addWidget(self.cb_lang)
+        tb.addSeparator()
+        tb.addWidget(QLabel(tr(' Одновременно ящиков: ')))
         self.sp_parallel = QSpinBox(minimum=1, maximum=20, value=self.cfg.parallel)
         self.sp_parallel.valueChanged.connect(self._parallel_changed)
         tb.addWidget(self.sp_parallel)
@@ -190,7 +200,7 @@ class MainWindow(QMainWindow):
             if w:
                 self.table.setColumnWidth(c, w)
         hdr = QTableWidgetItem("✔")
-        hdr.setToolTip("Отметить все ящики / снять все отметки")
+        hdr.setToolTip(tr('Отметить все ящики / снять все отметки'))
         self.table.setHorizontalHeaderItem(C_CHECK, hdr)
         hh.sectionClicked.connect(self._header_clicked)
         self.table.doubleClicked.connect(self._double_clicked)
@@ -204,8 +214,8 @@ class MainWindow(QMainWindow):
         self.log_tabs.setDocumentMode(True)
         self.log_tabs.setUsesScrollButtons(True)
         self.log = self._new_log_view()             # вкладка «Все»: общий журнал
-        self.log_tabs.addTab(self.log, "Все")
-        self.log_tabs.setTabToolTip(0, "Журнал всех ящиков вместе")
+        self.log_tabs.addTab(self.log, tr('Все'))
+        self.log_tabs.setTabToolTip(0, tr('Журнал всех ящиков вместе'))
         split.addWidget(self.log_tabs)
         split.setSizes([450, 250])
         w = QWidget()
@@ -218,8 +228,7 @@ class MainWindow(QMainWindow):
 
     def _update_statusbar(self):
         self.statusBar().showMessage(
-            f"Архив: {self.cfg.archive_dir}   |   Работает: {len(self.running)}"
-            f"   |   Отмечено ящиков: {len(self.checked)}")
+            tr('Архив: {0}   |   Работает: {1}   |   Отмечено ящиков: {2}').format(self.cfg.archive_dir, len(self.running), len(self.checked)))
 
     # ================= таблица =================
     def _row_of(self, acc_id):
@@ -307,12 +316,12 @@ class MainWindow(QMainWindow):
         if pb:
             if s["total"]:
                 set_progress(pb, s["done"], s["total"])
-                pb.setToolTip(f"Скачано новых писем: {progress_text(s['done'], s['total'])}")
+                pb.setToolTip(tr('Скачано новых писем: {0}').format(progress_text(s['done'], s['total'])))
             else:
                 pb.setRange(0, 1)
                 finished_ok = s["kind"] in ("ok", "warn")
                 pb.setValue(1 if finished_ok else 0)
-                pb.setFormat("Новых писем нет (100%)" if finished_ok else "")
+                pb.setFormat(tr('Новых писем нет (100%)') if finished_ok else "")
                 pb.setToolTip("")
 
     def _sync_actions(self):
@@ -325,7 +334,7 @@ class MainWindow(QMainWindow):
         self.a_del.setEnabled(any(a.id not in self.running for a in targets))
         self.a_run_sel.setEnabled(any(a.id not in self.running for a in targets))
         n = len(self.checked)
-        self.a_run_sel.setText(f"Запустить отмеченные ({n})" if n else "Запустить выбранные")
+        self.a_run_sel.setText(tr('Запустить отмеченные ({n})').format(n=n) if n else tr('Запустить выбранные'))
         if len(sel) == 1:
             self._show_log_of(sel[0].email)
         self.a_stop.setEnabled(bool(self.running))
@@ -347,8 +356,7 @@ class MainWindow(QMainWindow):
 
     def _edit_account(self, acc):
         if acc.id in self.running:
-            QMessageBox.information(self, "Изменение", "Идёт загрузка этого ящика — "
-                                    "сначала остановите её.")
+            QMessageBox.information(self, tr('Изменение'), tr('Идёт загрузка этого ящика — сначала остановите её.'))
             return
         d = AccountDialog(self, acc, default_archive=self.cfg.archive_dir)
         if not d.exec():
@@ -360,15 +368,13 @@ class MainWindow(QMainWindow):
             return
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Папка для писем изменилась")
-        box.setText(f"Уже скачанные письма этого ящика лежат в:\n{old_dir}\n\n"
-                    f"Новая папка:\n{new_dir}\n\nПеренести письма в новую папку?")
-        box.setInformativeText("Если не переносить, в новой папке загрузка начнётся заново, "
-                               "а старые письма останутся на прежнем месте.")
+        box.setWindowTitle(tr('Папка для писем изменилась'))
+        box.setText(tr('Уже скачанные письма этого ящика лежат в:\n{old_dir}\n\nНовая папка:\n{new_dir}\n\nПеренести письма в новую папку?').format(old_dir=old_dir, new_dir=new_dir))
+        box.setInformativeText(tr('Если не переносить, в новой папке загрузка начнётся заново, а старые письма останутся на прежнем месте.'))
         R = QMessageBox.ButtonRole
-        b_move = box.addButton("Перенести письма", R.AcceptRole)
-        b_keep = box.addButton("Не переносить", R.DestructiveRole)
-        box.addButton("Отмена", R.RejectRole)
+        b_move = box.addButton(tr('Перенести письма'), R.AcceptRole)
+        b_keep = box.addButton(tr('Не переносить'), R.DestructiveRole)
+        box.addButton(tr('Отмена'), R.RejectRole)
         box.setDefaultButton(b_move)
         box.exec()
         clicked = box.clickedButton()
@@ -384,17 +390,15 @@ class MainWindow(QMainWindow):
 
     def _move_mailbox(self, acc, new, old_dir, new_dir):
         if new_dir.exists() and any(new_dir.iterdir()):
-            QMessageBox.warning(self, "Перенос писем",
-                                f"В новой папке уже есть письма этого ящика:\n{new_dir}\n\n"
-                                "Перенос отменён, настройки не изменены. Выберите пустую папку "
-                                "или перенесите письма вручную.")
+            QMessageBox.warning(self, tr('Перенос писем'),
+                                tr('В новой папке уже есть письма этого ящика:\n{new_dir}\n\nПеренос отменён, настройки не изменены. Выберите пустую папку или перенесите письма вручную.').format(new_dir=new_dir))
             return
         self.running[acc.id] = threading.Event()        # блокирует запуск и изменение
-        self.state[acc.id].update(status="Перенос писем в новую папку…", kind="running",
+        self.state[acc.id].update(status=tr('Перенос писем в новую папку…'), kind="running",
                                   done=0, total=0)
         self._update_row(acc.id)
         self._sync_actions()
-        self._write_log(acc.email, f"Перенос писем: {old_dir} → {new_dir}")
+        self._write_log(acc.email, tr('Перенос писем: {old_dir} → {new_dir}').format(old_dir=old_dir, new_dir=new_dir))
 
         def job():
             new_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -406,20 +410,19 @@ class MainWindow(QMainWindow):
         def done(_):
             self.running.pop(acc.id, None)
             self._apply_account(acc.id, new)
-            self.state[new.id].update(status="Письма перенесены в новую папку", kind="ok")
+            self.state[new.id].update(status=tr('Письма перенесены в новую папку'), kind="ok")
             self._update_row(new.id)
-            self._write_log(new.email, "Перенос завершён")
+            self._write_log(new.email, tr('Перенос завершён'))
             self._sync_actions()
 
         def fail(err):
             self.running.pop(acc.id, None)
-            self.state[acc.id].update(status=f"Перенос не удался: {err}", kind="error")
+            self.state[acc.id].update(status=tr('Перенос не удался: {err}').format(err=err), kind="error")
             self._update_row(acc.id)
-            self._write_log(acc.email, f"Перенос не удался, настройки не изменены: {err}")
+            self._write_log(acc.email, tr('Перенос не удался, настройки не изменены: {err}').format(err=err))
             self._sync_actions()
-            QMessageBox.warning(self, "Перенос писем",
-                                f"Не удалось перенести письма:\n{err}\n\nНастройки ящика не "
-                                f"изменены. Проверьте обе папки:\n{old_dir}\n{new_dir}")
+            QMessageBox.warning(self, tr('Перенос писем'),
+                                tr('Не удалось перенести письма:\n{err}\n\nНастройки ящика не изменены. Проверьте обе папки:\n{old_dir}\n{new_dir}').format(err=err, old_dir=old_dir, new_dir=new_dir))
         run_bg(job, done, fail)
 
     def _duplicate(self):
@@ -432,7 +435,7 @@ class MainWindow(QMainWindow):
         base.email = base.login = ""
         base.password = ""
         d = AccountDialog(self, base, default_archive=self.cfg.archive_dir)
-        d.setWindowTitle("Добавить почтовый ящик")
+        d.setWindowTitle(tr('Добавить почтовый ящик'))
         if d.exec():
             self.cfg.accounts.append(d.account)
             self.cfg.save()
@@ -446,8 +449,7 @@ class MainWindow(QMainWindow):
         if not sel:
             return
         names = "\n".join(a.email for a in sel)
-        if QMessageBox.question(self, "Удаление", f"Удалить из списка?\n\n{names}\n\n"
-                                "Уже скачанные письма в архиве останутся на диске.") \
+        if QMessageBox.question(self, tr('Удаление'), tr('Удалить из списка?\n\n{names}\n\nУже скачанные письма в архиве останутся на диске.').format(names=names)) \
                 != QMessageBox.StandardButton.Yes:
             return
         ids = {a.id for a in sel}
@@ -463,6 +465,43 @@ class MainWindow(QMainWindow):
     def _parallel_changed(self, v):
         self.cfg.parallel = v
         self.cfg.save()
+
+    def _language_changed(self):
+        code = self.cb_lang.currentData()
+        self.cfg.language = code
+        self.cfg.save()
+        if code == i18n.LANG:
+            return
+        busy = bool(self.running) or any(d.busy() for d in self._exports)
+        if busy:
+            QMessageBox.information(
+                self, APP_NAME,
+                "Язык изменится после перезапуска программы. Сейчас идёт загрузка или экспорт — "
+                "перезапустите программу, когда они закончатся.\n\n"
+                "The language will change after the program restarts. A download or export is "
+                "running now — restart the program when it finishes.")
+            return
+        if QMessageBox.question(
+                self, APP_NAME,
+                "Язык изменится после перезапуска программы. Перезапустить сейчас?\n\n"
+                "The language will change after the program restarts. Restart now?") \
+                == QMessageBox.StandardButton.Yes:
+            self._restart()
+
+    def _restart(self):
+        import subprocess
+        if getattr(sys, "frozen", False):            # собранный .exe
+            cmd = [sys.executable] + sys.argv[1:]
+        else:
+            cmd = [sys.executable, os.path.abspath(sys.argv[0])] + sys.argv[1:]
+        # новый экземпляр .exe должен распаковаться заново, а не в папку текущего
+        env = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
+        try:
+            subprocess.Popen(cmd, env=env, close_fds=True)
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, f"{e}")
+            return
+        self.close()
 
     def _theme_changed(self):
         self.cfg.theme = self.cb_theme.currentData()
@@ -486,7 +525,7 @@ class MainWindow(QMainWindow):
             self.apply_theme()
 
     def _choose_archive(self):
-        d = QFileDialog.getExistingDirectory(self, "Папка архива", self.cfg.archive_dir)
+        d = QFileDialog.getExistingDirectory(self, tr('Папка архива'), self.cfg.archive_dir)
         if d:
             self.cfg.archive_dir = d
             self.cfg.save()
@@ -560,24 +599,24 @@ class MainWindow(QMainWindow):
 
         m = QMenu(self)
         a_run = m.addAction(st.standardIcon(SP.SP_MediaPlay),
-                            ("Запуск загрузки писем отмеченных ящиков" if many
-                             else "Запуск загрузки писем") + suffix)
+                            (tr('Запуск загрузки писем отмеченных ящиков') if many
+                             else tr('Запуск загрузки писем')) + suffix)
         a_run.setEnabled(bool(idle))
         a_stop = None
         if busy:
             a_stop = m.addAction(st.standardIcon(SP.SP_MediaStop),
-                                 "Остановить загрузку" + (f" ({len(busy)})" if many else ""))
+                                 tr('Остановить загрузку') + (f" ({len(busy)})" if many else ""))
         a_exp = m.addAction(st.standardIcon(SP.SP_DialogSaveButton),
-                            ("Экспорт отмеченных ящиков в PST" if many
-                             else "Экспорт почтового ящика в PST") + suffix)
-        a_view = m.addAction(st.standardIcon(SP.SP_FileDialogContentsView), "Просмотр писем")
+                            (tr('Экспорт отмеченных ящиков в PST') if many
+                             else tr('Экспорт почтового ящика в PST')) + suffix)
+        a_view = m.addAction(st.standardIcon(SP.SP_FileDialogContentsView), tr('Просмотр писем'))
         m.addSeparator()
         a_edit = m.addAction(st.standardIcon(SP.SP_FileDialogDetailedView),
-                             "Изменение почтового ящика")
+                             tr('Изменение почтового ящика'))
         a_edit.setEnabled(not many and acc.id not in self.running)
         a_del = m.addAction(st.standardIcon(SP.SP_TrashIcon),
-                            ("Удаление отмеченных ящиков" if many
-                             else "Удаление почтового ящика") + suffix)
+                            (tr('Удаление отмеченных ящиков') if many
+                             else tr('Удаление почтового ящика')) + suffix)
         a_del.setEnabled(bool(idle))
 
         a_run.triggered.connect(lambda: self._start(idle))
@@ -598,7 +637,7 @@ class MainWindow(QMainWindow):
 
     def _start(self, accounts):
         if not accounts:
-            QMessageBox.information(self, "Запуск", "Нет ящиков для запуска.")
+            QMessageBox.information(self, tr('Запуск'), tr('Нет ящиков для запуска.'))
             return
         if not self.running:
             self.sem = threading.BoundedSemaphore(self.sp_parallel.value())
@@ -606,7 +645,7 @@ class MainWindow(QMainWindow):
             if a.id in self.running:
                 continue
             if not a.password:
-                pw, ok = QInputDialog.getText(self, "Пароль", f"Пароль для {a.email}:",
+                pw, ok = QInputDialog.getText(self, tr('Пароль'), tr('Пароль для {0}:').format(a.email),
                                               QLineEdit.EchoMode.Password)
                 if not ok or not pw:
                     continue
@@ -616,12 +655,12 @@ class MainWindow(QMainWindow):
             stop = threading.Event()
             self.running[a.id] = stop
             st = self.state[a.id] = new_state()
-            st.update(status="В очереди", kind="running")
+            st.update(status=tr('В очереди'), kind="running")
             self._update_row(a.id)
             d = Downloader(copy.deepcopy(a), self.cfg.archive_root_for(a),
                            Callbacks(self.bridge, a.id), stop, self.sem)
             threading.Thread(target=d.run, name=f"dl-{a.email}", daemon=True).start()
-            self._write_log(a.email, "Запуск загрузки")
+            self._write_log(a.email, tr('Запуск загрузки'))
         self._sync_actions()
 
     def _stop_selected(self):
@@ -635,7 +674,7 @@ class MainWindow(QMainWindow):
         if ev is None:
             return
         ev.set()
-        self.state[acc_id].update(status="Остановка…")
+        self.state[acc_id].update(status=tr('Остановка…'))
         self._update_row(acc_id)
 
     # ================= сигналы от потоков =================
@@ -657,7 +696,7 @@ class MainWindow(QMainWindow):
             v = self._new_log_view()
             self._log_views[key] = v
             i = self.log_tabs.addTab(v, email)
-            self.log_tabs.setTabToolTip(i, f"Журнал ящика {email}")
+            self.log_tabs.setTabToolTip(i, tr('Журнал ящика {email}').format(email=email))
         return v
 
     def _color_log_tab(self, email: str):
@@ -728,7 +767,7 @@ class MainWindow(QMainWindow):
         self._sync_actions()
         if not self.running:
             QApplication.alert(self)
-            self.statusBar().showMessage("Все задачи завершены", 10000)
+            self.statusBar().showMessage(tr('Все задачи завершены'), 10000)
 
     # ---------- вопрос «пропустить письмо?» (по одному окну за раз) ----------
     def _on_ask(self, q):
@@ -752,17 +791,14 @@ class MainWindow(QMainWindow):
         err_color = theme.status_color("error")
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Ошибка при загрузке письма")
-        box.setText(f"<b>{html.escape(q.email)}</b><br>Папка: {html.escape(q.folder)}<br>"
-                    f"UID письма: {html.escape(q.uid)}<br><br>"
-                    f"<span style='color:{err_color}'>{html.escape(q.error)}</span><br><br>"
-                    "Пропустить это письмо и продолжить загрузку?")
+        box.setWindowTitle(tr('Ошибка при загрузке письма'))
+        box.setText(tr("<b>{0}</b><br>Папка: {1}<br>UID письма: {2}<br><br><span style='color:{err_color}'>{3}</span><br><br>Пропустить это письмо и продолжить загрузку?").format(html.escape(q.email), html.escape(q.folder), html.escape(q.uid), html.escape(q.error), err_color=err_color))
         box.setDetailedText(q.details)
         R = QMessageBox.ButtonRole
-        b_skip = box.addButton("Пропустить", R.AcceptRole)
-        b_all = box.addButton("Пропускать все ошибки этого ящика", R.AcceptRole)
-        b_retry = box.addButton("Повторить", R.ActionRole)
-        b_stop = box.addButton("Остановить ящик", R.RejectRole)
+        b_skip = box.addButton(tr('Пропустить'), R.AcceptRole)
+        b_all = box.addButton(tr('Пропускать все ошибки этого ящика'), R.AcceptRole)
+        b_retry = box.addButton(tr('Повторить'), R.ActionRole)
+        b_stop = box.addButton(tr('Остановить ящик'), R.RejectRole)
         box.setDefaultButton(b_skip)
         box.exec()
         if q.cancelled:
@@ -776,14 +812,12 @@ class MainWindow(QMainWindow):
         if self.running or busy_exports:
             what = []
             if self.running:
-                what.append("загрузка почты")
+                what.append(tr('загрузка почты'))
             if busy_exports:
-                what.append("экспорт в PST")
-            if QMessageBox.question(self, "Выход",
-                                    f"Сейчас идёт {' и '.join(what)}. Остановить и выйти?\n"
-                                    "Уже скачанные письма сохранятся, при следующем запуске "
-                                    "загрузка продолжится. Уже записанные в PST письма "
-                                    "останутся в файле.") != QMessageBox.StandardButton.Yes:
+                what.append(tr('экспорт в PST'))
+            joined = tr(' и ').join(what)
+            if QMessageBox.question(self, tr('Выход'),
+                                    tr('Сейчас идёт {joined}. Остановить и выйти?\nУже скачанные письма сохранятся, при следующем запуске загрузка продолжится. Уже записанные в PST письма останутся в файле.').format(joined=joined)) != QMessageBox.StandardButton.Yes:
                 e.ignore()
                 return
             for stop in self.running.values():
@@ -791,7 +825,7 @@ class MainWindow(QMainWindow):
             for d in busy_exports:
                 d.stop_and_close()
             # PST-файл нужно корректно дописать, иначе он будет повреждён
-            self.statusBar().showMessage("Завершаю экспорт: дописываю структуру PST-файлов…")
+            self.statusBar().showMessage(tr('Завершаю экспорт: дописываю структуру PST-файлов…'))
             while any(d.busy() for d in busy_exports):
                 QApplication.processEvents()
                 time.sleep(0.05)
@@ -805,6 +839,13 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    QLocale.setDefault(QLocale(QLocale.Language.Russian if i18n.LANG == "ru"
+                               else QLocale.Language.English))
+    if i18n.LANG == "ru":                       # русские стандартные кнопки Qt («Да», «Нет»…)
+        qt_tr = QTranslator(app)
+        path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        if qt_tr.load("qtbase_ru", path):
+            app.installTranslator(qt_tr)
     cfg = Config()
     cfg.load()
     theme.apply(app, cfg.theme)        # тема до создания окон

@@ -11,7 +11,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pyinstaller
-      - run: pyinstaller --noconfirm --clean --onefile --windowed --name "Shinra Tensei" --hidden-import win32timezone app.py
+      # native core (Rust); the windows-latest image already has Rust installed
+      - run: rustc --version
+      - run: pip install ./native
+      - run: python -c "import core.pst_writer as w; assert w.NATIVE, 'native core not loaded'"
+      - run: pyinstaller --noconfirm --clean --onefile --windowed --name "Shinra Tensei" --hidden-import win32timezone --hidden-import shinra_core app.py
       - uses: actions/upload-artifact@v4
         with:
           name: Shinra-Tensei

@@ -1,4 +1,5 @@
 """Работа с IMAP-сервером: подключение, список папок, поиск и загрузка писем."""
+import calendar
 import imaplib
 import re
 import ssl
@@ -101,8 +102,36 @@ def parse_list_response(data) -> list[Folder]:
     return folders
 
 
+_INTERNALDATE = re.compile(
+    rb'INTERNALDATE\s+"\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})'
+    rb'(?:\s*([-+])(\d{2}):?(\d{2}))?\s*"', re.IGNORECASE)
+_MONTHS = {m.lower(): i for i, m in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), 1)}
+
+
+def parse_internaldate(meta: bytes):
+    """INTERNALDATE -> секунды эпохи или None. Мягче imaplib.Internaldate2tuple: тот требует
+    ровно «DD-Mon-YYYY HH:MM:SS +ZZZZ» и на любом отступлении молча возвращает None —
+    тогда у файла оставалась дата загрузки вместо даты получения."""
+    m = _INTERNALDATE.search(meta)
+    if not m:
+        return None
+    day, mon, year, hh, mm, ss, sign, zh, zm = m.groups()
+    month = _MONTHS.get(mon.decode("ascii").lower())
+    if not month:
+        return None
+    try:
+        utc = calendar.timegm((int(year), month, int(day), int(hh), int(mm), int(ss), 0, 0, 0))
+    except (ValueError, OverflowError):
+        return None
+    if sign:
+        zone = (int(zh) * 60 + int(zm)) * 60
+        utc -= zone if sign == b"+" else -zone
+    return float(utc)
+
+
 def parse_fetch_response(data):
-    """Возвращает (тело письма, флаги, internaldate struct_time | None)."""
+    """Возвращает (тело письма, флаги, internaldate в секундах эпохи | None)."""
     body = None
     meta = b""
     for part in data:
@@ -116,7 +145,7 @@ def parse_fetch_response(data):
         raise ImapError(tr('Сервер не вернул содержимое письма (письмо удалено, повреждено или недоступно)'))
     m = re.search(rb"FLAGS \(([^)]*)\)", meta)
     flags = m.group(1).decode("utf-8", "replace") if m else ""
-    idate = imaplib.Internaldate2tuple(meta)
+    idate = parse_internaldate(meta)
     return body, flags, idate
 
 

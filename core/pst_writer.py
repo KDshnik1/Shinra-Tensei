@@ -239,7 +239,7 @@ def _bth(heap: Heap, cb_key: int, cb_ent: int, records: list) -> int:
 
 def _encode(ptype: int, value) -> bytes:
     if ptype == PT_STR:
-        return str(value).encode("utf-16-le")
+        return str(value).encode("utf-16-le", "replace")   # одиночные суррогаты -> «?»
     if ptype == PT_BIN:
         return bytes(value)
     if ptype in (PT_I8, PT_TIME):
@@ -692,10 +692,31 @@ class PstFile:
         self.f.seek(0)
         self.f.write(bytes(h))
         self.f.close()
+        self._closed = True
 
     def abort(self):
+        if getattr(self, "_closed", False):     # готовый файл не удаляем
+            return
         try:
             self.f.close()
             os.remove(self.path)
         except OSError:
             pass
+
+
+# ================================================================ нативное ядро (Rust)
+# Если собран модуль shinra_core (папка native/), PstFile берётся из него: файл
+# получается побайтно тем же, но письма разбираются и пишутся на Rust без GIL —
+# несколько экспортов в разных потоках идут параллельно. Без модуля, или с
+# переменной окружения SHINRA_PURE_PYTHON=1, работает Python-версия выше.
+PyPstFile = PstFile
+NATIVE = False
+if not os.environ.get("SHINRA_PURE_PYTHON"):
+    try:
+        import shinra_core as _native
+    except ImportError:
+        _native = None
+    if _native is not None:
+        _native.set_translator(tr)
+        PstFile = _native.PstFile
+        NATIVE = True
