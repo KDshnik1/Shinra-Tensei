@@ -1,0 +1,16 @@
+From: q@w.e
+Subject: no close
+Date: 1 Jan 70 00:00:00 EST
+Content-Type: multipart/mixed; boundary=zz
+
+--zz
+Content-Type: text/plain
+
+part one
+--zz
+--zz
+Content-Type: application/zip; name=a.zip
+Content-Transfer-Encoding: base64
+
+UEsDBAo=garbageafterpad
+UEsDBA

@@ -1,0 +1,64 @@
+From: "Petrov, Ivan" <ivan@example.ru>
+To: undisclosed-recipients:;
+Cc: "Doe, John" <j@d.com>, (comment) x@y.z, Plain Name <p@n.com>
+Subject: =?utf-8?B?0JLQu9C+0LbQtdC90LjRjyDRgSDQtNC70LjQvdC90YvQvNC4INC40LzQtdC90LDQvNC4?=
+Date: Tue, 31 Feb 2024 10:00:00 +0300
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="XYZ"
+
+preamble
+--XYZ
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: base64
+
+0KLQtdC70L4g0L/QuNGB0YzQvNCwDQrRgSDQv9C10YDQtdC90L7RgdCw0LzQuA0K
+
+--XYZ
+Content-Type: application/pdf
+Content-Disposition: attachment; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82%202024.pdf
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQgdGVzdA==
+
+--XYZ
+Content-Type: application/octet-stream
+Content-Disposition: attachment;
+ filename*0*=utf-8''%D0%B4%D0%BB%D0%B8%D0%BD;
+ filename*1*=%D0%BD%D0%BE%D0%B5;
+ filename*2="_name.txt"
+
+data here
+
+--XYZ
+Content-Type: application/msword; name="=?windows-1251?B?xO7j7uLu8A==?=.doc"
+Content-Transfer-Encoding: base64
+
+0M8R4A==
+
+--XYZ
+Content-Type: text/plain; name="Ñ÷¸ò.txt"
+Content-Disposition: attachment; filename="Ñ÷¸ò.txt"
+
+ñóììà 100
+
+--XYZ
+Content-Type: image/png
+Content-ID: <img001@local>
+Content-Transfer-Encoding: base64
+
+iVBORyBmYWtl
+
+--XYZ
+Content-Type: application/x-thing; name="CON.txt"
+
+x
+--XYZ
+Content-Type: application/x-thing; name="C:\\dir\\..hidden"
+
+y
+--XYZ
+Content-Type: application/x-thing; name="report."
+
+z
+--XYZ--
+epilogue
