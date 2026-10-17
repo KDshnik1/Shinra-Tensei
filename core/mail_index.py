@@ -64,6 +64,11 @@ def mailbox_folders(mailbox_dir: Path) -> list[dict]:
 
 
 def load_folder(fdir: Path, folder_display: str, stop=None) -> list[dict]:
+    return load_folders([(fdir, folder_display)], stop)
+
+
+def _scan_folder(fdir: Path):
+    """(путь index.json, кэш, [(имя, путь, stat)], [(путь, stat)] для разбора)."""
     idx_path = fdir / "index.json"
     cache = {}
     try:
@@ -73,30 +78,48 @@ def load_folder(fdir: Path, folder_display: str, stop=None) -> list[dict]:
     except Exception:
         pass
     files = msgfile.scan_messages(fdir)
-    todo = [(Path(path), st) for name, path, st in files
+    todo = [(path, st) for name, path, st in files
             if not ((c := cache.get(name)) and c.get("fsize") == st.st_size
                     and c.get("mtime") == int(st.st_mtime))]
+    return idx_path, cache, files, todo
+
+
+def load_folders(folders, stop=None) -> list[dict]:
+    """Строки просмотрщика для нескольких папок: folders — [(папка, имя для показа)].
+    Новые письма всех папок разбираются одним пулом потоков — так ящик из множества
+    небольших папок индексируется быстрее, чем папка за папкой."""
+    # чтение папок — по очереди: в потоках оно медленнее (разбор index.json держит GIL)
+    scans = []
+    for f in folders:
+        if stop is not None and stop():     # выбрали другую папку — эта загрузка не нужна
+            return []
+        scans.append(_scan_folder(Path(f[0])))
+    if stop is not None and stop():
+        return []
+    todo = [t for sc in scans for t in sc[3]]
     fresh = _summarize_all(todo, stop)
     if fresh is None:
         return []
-    changed = bool(todo)
-    rows, items = [], {}
-    for name, path, _st in files:
-        row = fresh.get(name) or cache[name]
-        items[name] = row
-        rows.append(dict(row, folder=folder_display, path=path))
-    if changed or len(items) != len(cache):
-        try:
-            tmp = idx_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"v": INDEX_VERSION, "items": items}, ensure_ascii=False),
-                           encoding="utf-8")
-            os.replace(tmp, idx_path)
-        except Exception:
-            pass
+    rows = []
+    for (_fdir, display), (idx_path, cache, files, part_todo) in zip(folders, scans):
+        items = {}
+        for name, path, _st in files:
+            row = fresh.get(path) or cache[name]
+            items[name] = row
+            rows.append(dict(row, folder=display, path=path))
+        if part_todo or len(items) != len(cache):
+            try:
+                tmp = idx_path.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"v": INDEX_VERSION, "items": items}, ensure_ascii=False),
+                               encoding="utf-8")
+                os.replace(tmp, idx_path)
+            except Exception:
+                pass
     return rows
 
 
-def _summary_or_error(p: Path, st) -> dict:
+def _summary_or_error(path: str, st) -> dict:
+    p = Path(path)
     try:
         return summarize(p, st)
     except Exception as e:
@@ -107,17 +130,17 @@ def _summary_or_error(p: Path, st) -> dict:
 
 
 def _summarize_all(todo, stop) -> dict | None:
-    """{имя файла: сведения} для новых и изменённых писем; None — если остановили.
+    """{путь письма: сведения} для новых и изменённых писем; None — если остановили.
     С нативным ядром — в несколько потоков (разбор идёт без GIL)."""
     out = {}
     if not mailparse.NATIVE or len(todo) < 64:
         for p, st in todo:
             if stop is not None and stop():
                 return None
-            out[p.name] = _summary_or_error(p, st)
+            out[p] = _summary_or_error(p, st)
         return out
     with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
-        futures = [(p.name, ex.submit(_summary_or_error, p, st)) for p, st in todo]
+        futures = [(p, ex.submit(_summary_or_error, p, st)) for p, st in todo]
         for name, f in futures:
             if stop is not None and stop():
                 for _n, g in futures:

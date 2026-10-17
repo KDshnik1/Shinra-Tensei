@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from core import msgfile
-from core.mail_index import all_mailboxes, load_folder, load_texts, mailbox_folders
+from core.mail_index import all_mailboxes, load_folders, load_texts, mailbox_folders
 from core.mailparse import head_text, parse_full, sent_datetime
 from . import icons, theme
 from .common import progress_text, run_bg
@@ -402,13 +402,9 @@ class ViewerWindow(QDialog):
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
 
         def job():
-            rows = []
-            for f in folders:
-                if token != self._load_token:
-                    return None
-                rows += load_folder(Path(f["dir"]), f["display"],
-                                    stop=lambda: token != self._load_token)
-            return prepare_rows(rows)
+            rows = load_folders([(f["dir"], f["display"]) for f in folders],
+                                stop=lambda: token != self._load_token)
+            return None if token != self._load_token else prepare_rows(rows)
 
         def done(rows):
             QApplication.restoreOverrideCursor()
