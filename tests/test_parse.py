@@ -94,6 +94,22 @@ class ParseTest(unittest.TestCase):
                     a = mailparse.search_text(f)
                 self.assertEqual(norm_text(a), norm_text(shinra_core.search_text(f)))
 
+    @native_or_skip
+    def test_body_parity(self):
+        """Письмо в просмотрщике: Rust (parse_body) и Python (parse_full) — одно и то же."""
+        for f in self.files:
+            with self.subTest(f.name):
+                with pure_parse():
+                    a = mailparse.parse_body(f)
+                b = mailparse.parse_body(f)
+                self.assertEqual((a.text, a.html), (b.text, b.html))
+                self.assertEqual([(x.name, x.ctype, x.cid, x.inline) for x in a.attachments],
+                                 [(x.name, x.ctype, x.cid, x.inline) for x in b.attachments])
+                for x, y in zip(a.attachments, b.attachments):
+                    # пересланное письмо Rust отдаёт байт в байт, Python собирает заново
+                    if x.ctype != "message/rfc822" and not self._is_known(f):
+                        self.assertEqual(x.data, y.data, x.name)
+
     def test_gz_same_as_plain(self):
         src = DATA / "gz_lf_only.eml.gz"
         plain = self.tmp / "plain.eml"

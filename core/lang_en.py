@@ -837,4 +837,6 @@ EN = {
         'Settings',
     'Тема, язык, число одновременно выкачиваемых ящиков':
         'Theme, language, number of mailboxes downloaded at once',
+    'Открываю письмо…':
+        'Opening the message…',
 }

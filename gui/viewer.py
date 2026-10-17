@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
 
 from core import msgfile
 from core.mail_index import all_mailboxes, load_folders, load_texts, mailbox_folders
-from core.mailparse import head_text, parse_full, sent_datetime
+from core.mailparse import clean_html, head_text, parse_body, sent_datetime
 from . import icons, theme
 from .common import progress_text, run_bg
 from .fit import ColumnFitter
@@ -241,6 +241,7 @@ class ViewerWindow(QDialog):
         self._texts_timer.timeout.connect(self._show_texts_progress)
         self._body = None
         self._current = None
+        self._msg_token = 0           # какое письмо сейчас разбирается в фоне
         self._build()
         self._fill_tree(select_email)
 
@@ -561,6 +562,8 @@ class ViewerWindow(QDialog):
     def _show_message(self, row):
         self._current = row
         self._body = None
+        self._msg_token += 1           # письмо, которое ещё разбирается, уже не нужно
+        token = self._msg_token
         self.att_list.clear()
         self.browser.inline = {}
         has = row is not None
@@ -588,14 +591,32 @@ class ViewerWindow(QDialog):
             + line(tr('Папка:'), f"{row.get('folder', '')}   •   {human_size(row.get('size', 0))}")
             + line(tr('Вложения:'), str(int(row.get("attach") or 0)) if row.get("attach") else "")
             + "</table>")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            body = parse_full(Path(row["path"]))
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            self.browser.setPlainText(tr('Не удалось разобрать письмо: {e}').format(e=e))
-            return
-        QApplication.restoreOverrideCursor()
+        # письмо разбирается в фоне: окно не замирает на больших вложениях, а при быстрой
+        # прокрутке списка показывается только последнее выбранное
+        path = Path(row["path"])
+
+        def job():
+            body = parse_body(path)
+            # HTML очищается здесь же, в фоне (без скриптов, скрытого текста, картинок из сети)
+            page = clean_html(body.html) if body.html else None
+            return body, page
+
+        def slow():        # подпись — только если письмо разбирается заметно долго (без мигания)
+            if token == self._msg_token and self._body is None:
+                self.browser.setStyleSheet("")
+                self.browser.setPlainText(tr('Открываю письмо…'))
+        QTimer.singleShot(150, slow)
+
+        def done(res):
+            if token == self._msg_token:
+                self._show_body(*res)
+
+        def fail(err):
+            if token == self._msg_token:
+                self.browser.setPlainText(tr('Не удалось разобрать письмо: {e}').format(e=err))
+        run_bg(job, done, fail)
+
+    def _show_body(self, body, page):
         self._body = body
         for a in body.attachments:
             if a.cid:
@@ -610,11 +631,11 @@ class ViewerWindow(QDialog):
         self.btn_save_all.setEnabled(self.att_list.count() > 0)
         doc = self.browser.document()
         doc.clear()
-        if body.html:
+        if page:
             # HTML-письма рассчитаны на белый фон — показываем их «на бумаге» в любой теме
             self.browser.setStyleSheet("QTextBrowser { background: #ffffff; color: #1d1d1d; }")
             doc.setDefaultStyleSheet("body { color: #1d1d1d; }")
-            self.browser.setHtml(body.html)
+            self.browser.setHtml(page)
         else:
             self.browser.setStyleSheet("")
             doc.setDefaultStyleSheet("")

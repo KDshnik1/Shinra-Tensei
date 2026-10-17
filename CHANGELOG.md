@@ -7,6 +7,22 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.18.0] — 2026-10-17
+
+### Changed
+- **A message opens in the background.** Before, the viewer parsed the message in the window's own
+  thread, so a message with tens of MB of attachments froze the window for seconds. Now the Rust
+  core parses it in the background (the same MIME parser as for PST); the window stays responsive,
+  and "Opening the message…" appears if parsing takes longer than a moment. Clicking another message
+  meanwhile simply shows that one. Without the Rust core the Python parser is used as before.
+- **HTML messages are cleaned before they are shown.** The viewer cannot hide elements and does not
+  load pictures from the internet, so newsletters showed hidden preview text, duplicated "mobile
+  version" blocks and empty boxes instead of remote pictures. Now hidden elements are removed, a
+  remote picture is replaced by its caption (tracking pixels by nothing), and scripts, frames, forms,
+  embedded objects, `on…` handlers and `javascript:` links are dropped. Pictures inside the message
+  (`cid:`) are kept. The same rules are implemented in Rust and in Python.
+- Archives and PST files are not affected: only what the viewer shows changes.
+
 ## [0.17.0] — 2026-10-17
 
 ### Fixed

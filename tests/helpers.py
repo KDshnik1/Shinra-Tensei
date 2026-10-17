@@ -30,12 +30,12 @@ def native_or_skip(test):
 @contextlib.contextmanager
 def pure_parse():
     """Разбор писем на Python, даже если нативный модуль загружен."""
-    old = mailparse.NATIVE, mailparse.NATIVE_TEXT
-    mailparse.NATIVE = mailparse.NATIVE_TEXT = False
+    old = mailparse.NATIVE, mailparse.NATIVE_TEXT, mailparse.NATIVE_BODY
+    mailparse.NATIVE = mailparse.NATIVE_TEXT = mailparse.NATIVE_BODY = False
     try:
         yield
     finally:
-        mailparse.NATIVE, mailparse.NATIVE_TEXT = old
+        mailparse.NATIVE, mailparse.NATIVE_TEXT, mailparse.NATIVE_BODY = old
 
 
 def gen_message(rnd: random.Random, i: int, fi: int = 0, attach: bool = False) -> bytes:

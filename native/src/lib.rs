@@ -16,6 +16,7 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 mod addr;
 mod date;
 mod download;
+mod html;
 mod imap;
 mod mail;
 mod pst;
@@ -416,6 +417,36 @@ fn parse_eml(py: Python<'_>, path: PathBuf, read: bool) -> PyResult<ParsedEml> {
     .map_err(|e| to_pyerr(py, e))
 }
 
+/// Письмо для просмотра: (текст, HTML, [(имя, тип, данные, cid, встроено)]) — без GIL,
+/// чтобы окно не замирало на письмах с большими вложениями.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn parse_body(
+    py: Python<'_>,
+    path: PathBuf,
+) -> PyResult<(Option<String>, Option<String>, Vec<(String, String, Py<PyBytes>, String, bool)>)> {
+    let fwd = tr(py, "Пересланное письмо");
+    let body = py
+        .allow_threads(|| {
+            guard(PARSE_PANIC, || mail::parse_body(&path, &fwd).map_err(PstError::from))
+        })
+        .map_err(|e| to_pyerr(py, e))?;
+    let atts = body
+        .attachments
+        .into_iter()
+        .map(|a| (a.name, a.ctype, PyBytes::new(py, &a.data).unbind(), a.cid, a.inline))
+        .collect();
+    Ok((body.text, body.html, atts))
+}
+
+/// HTML письма для показа в просмотрщике (см. html.rs) — без GIL.
+#[pyfunction]
+fn clean_html(py: Python<'_>, html: String) -> String {
+    py.allow_threads(|| {
+        std::panic::catch_unwind(|| html::clean_html(&html)).unwrap_or_else(|_| html.clone())
+    })
+}
+
 /// Текст письма для поиска (обычный текст или HTML без разметки) — без GIL.
 #[pyfunction]
 fn search_text(py: Python<'_>, path: PathBuf) -> PyResult<String> {
@@ -680,6 +711,8 @@ fn shinra_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ParsedEml>()?;
     m.add_function(wrap_pyfunction!(parse_eml, m)?)?;
     m.add_function(wrap_pyfunction!(search_text, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_body, m)?)?;
+    m.add_function(wrap_pyfunction!(clean_html, m)?)?;
     m.add_function(wrap_pyfunction!(set_translator, m)?)?;
     m.add("ImapError", m.py().get_type::<ImapError>())?;
     m.add("TlsError", m.py().get_type::<TlsError>())?;

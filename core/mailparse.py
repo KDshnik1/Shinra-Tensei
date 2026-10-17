@@ -16,6 +16,7 @@ from email.policy import Compat32
 from pathlib import Path
 
 from . import msgfile
+from .htmlclean import clean_html as _py_clean_html
 from .i18n import tr
 
 _FALLBACK = ("utf-8", "cp1251", "koi8-r")
@@ -379,6 +380,26 @@ def parse_full(path: Path) -> Body:
     except RecursionError:     # сотни вложенных частей: что успели — сохраняем
         pass
     return body
+
+
+NATIVE_BODY = NATIVE and hasattr(_native, "parse_body")
+
+
+def parse_body(path: Path) -> Body:
+    """Письмо для просмотрщика. С нативным ядром разбор идёт без GIL, поэтому окно не
+    замирает, пока в фоне разбирается письмо с большими вложениями. Отличие от
+    parse_full: пересланное письмо (.eml) — исходные байты, а не пересобранные Python."""
+    if NATIVE_BODY:
+        text, html, atts = _native.parse_body(path)
+        return Body(text, html, [Attachment(n, c, d, cid, inline) for n, c, d, cid, inline in atts])
+    return parse_full(Path(path))
+
+
+def clean_html(h: str) -> str:
+    """HTML письма для показа: без скриптов, скрытого текста и картинок из интернета."""
+    if NATIVE and hasattr(_native, "clean_html"):
+        return _native.clean_html(h)
+    return _py_clean_html(h)
 
 
 def msgid_key(value) -> str:
