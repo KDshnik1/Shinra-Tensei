@@ -7,6 +7,46 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.13.0] — 2026-10-17
+
+### Added
+- **Duplicate messages are not downloaded.** In Gmail the same message sits both in its label
+  folder (such as Inbox) and in "All Mail", and used to be downloaded twice. Before downloading a
+  folder, the app now asks the server for the Message-IDs and sizes (without the messages) and skips
+  those already in the mailbox archive or downloaded earlier in this run. "All Mail" goes last, so
+  messages stay in their label folders and "All Mail" gets only messages without labels. Messages
+  without a Message-ID are always downloaded. The "Don't download duplicates of messages from other
+  folders" checkbox in the mailbox settings is on by default.
+- **Duplicates are not written to the PST.** A checkbox in the export window (on by default) drops
+  copies of the same message from different folders: the first copy stays, and "All Mail" goes last.
+  The number of skipped duplicates goes to the log and the report.
+- **Viewer filters:**
+  - where to search: everywhere, or only sender, recipients, subject or attachment names
+    ("everywhere" now also searches attachment names);
+  - "Only with attachments";
+  - "Size from … MB";
+  - a "Reset filters" button.
+  The date filters moved to a second row next to the new ones.
+- **Automated tests** in `tests/` (`python -m unittest discover -s tests -t .`), 34 tests, about
+  25 s:
+  - message parsing: Rust and Python give the same result, and 300 corrupted messages and thousands
+    of nested parts crash neither version;
+  - PST: Rust and Python write byte-identical files, exporting a mailbox with either version gives
+    the same messages, and both self-checks answer the same on 150 corrupted files;
+  - downloading from a fake IMAP server: batches, large messages, dropped connections, missing
+    messages, servers without batch fetch, sizes or header fetch, unsolicited responses,
+    duplicates;
+  - the viewer index, text search and the new filters.
+  GitHub Actions runs them twice on every push: with the native core and with
+  `SHINRA_PURE_PYTHON=1`. If they fail, the exe is not built.
+- **GitHub releases.** A version tag (`git tag v0.13.0 && git push origin v0.13.0`) builds the exe
+  and publishes it under Releases, with that version's changelog section as the description.
+
+### Fixed
+- After a dropped connection, the old connection's socket stayed open until garbage collection:
+  imaplib does not close it when LOGOUT fails. It is now closed right away.
+- README.md listed `models.py` under `native/` instead of `core/`.
+
 ## [0.12.0] — 2026-10-17
 
 ### Added

@@ -5,6 +5,54 @@ Placeholders {name} / {0} must stay the same as in the key.
 """
 
 EN = {
+    '«{0}»: сервер не выдал Message-ID писем ({e}), повторы в этой папке не ищутся':
+        '«{0}»: the server did not return Message-IDs ({e}), not looking for duplicates in this folder',
+    'Повторов не записано':
+        'Duplicates not written',
+    'Поиск повторов писем…':
+        'Looking for duplicate messages…',
+    '{0} (те же письма есть в других папках)':
+        '{0} (the same messages are in other folders)',
+    'Повторы писем (есть в другой папке) не экспортируются: {0}':
+        'Duplicate messages (already in another folder) not exported: {0}',
+    'Поиск повторов в архиве':
+        'Looking for duplicates in the archive',
+    'Повторов писем не загружено: {0}':
+        'Duplicate messages not downloaded: {0}',
+    'Не удалось прочитать архив для поиска повторов: {e}':
+        'Could not read the archive to look for duplicates: {e}',
+    '«{0}»: {1} писем уже есть в других папках — не загружаются':
+        '«{0}»: {1} messages are already in other folders, not downloading them',
+    'Не записывать повторы писем (то же письмо в нескольких папках, например «Вся почта» в Gmail)':
+        'Skip duplicate messages (the same message in several folders, such as “All Mail” in Gmail)',
+    'Везде':
+        'Everywhere',
+    'Отправитель':
+        'Sender',
+    'Получатели':
+        'Recipients',
+    'Имена вложений':
+        'Attachment names',
+    'Где искать':
+        'Where to search',
+    'Только с вложениями':
+        'Only with attachments',
+    'любой':
+        'any',
+    'Показывать только письма не меньше этого размера':
+        'Show only messages at least this large',
+    'Сбросить фильтры':
+        'Reset filters',
+    'Поиск: отправитель, получатель, тема, вложения…':
+        'Search: sender, recipient, subject, attachments…',
+    'Размер от':
+        'Size from',
+    ' МБ':
+        ' MB',
+    'Не загружать повторы писем из других папок (например, «Вся почта» в Gmail)':
+        "Don't download duplicates of messages from other folders (such as “All Mail” in Gmail)",
+    'Письмо с тем же Message-ID и размером, что уже есть в архиве ящика, второй раз не скачивается':
+        'A message with the same Message-ID and size as one already in the mailbox archive is not downloaded again',
     'в тексте писем':
         'in message text',
     'Искать и в тексте писем. В первый раз папка индексируется, потом поиск быстрый':
@@ -661,8 +709,6 @@ EN = {
         'received',
     'Дата':
         'Date',
-    'Поиск: отправитель, получатель, тема…':
-        'Search: sender, recipient, subject…',
     'Обновить':
         'Refresh',
     'Ящики и папки':
