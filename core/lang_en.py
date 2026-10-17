@@ -5,6 +5,10 @@ Placeholders {name} / {0} must stay the same as in the key.
 """
 
 EN = {
+    'Сервер не выдаёт письма пачками ({e}), качаю по одному':
+        'The server does not return messages in batches ({e}), downloading one at a time',
+    '«{0}»: сервер не сообщил размеры писем ({e}), качаю небольшими пачками':
+        '«{0}»: the server did not report message sizes ({e}), downloading in small batches',
     'Завершаю экспорт: дописываю структуру PST-файлов…':
         'Finishing export: writing the structure of PST files…',
     'Сейчас идёт {joined}. Остановить и выйти?\nУже скачанные письма сохранятся, при следующем запуске загрузка продолжится. Уже записанные в PST письма останутся в файле.':
