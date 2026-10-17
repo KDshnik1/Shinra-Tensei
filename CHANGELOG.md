@@ -7,6 +7,24 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.14.0] — 2026-10-17
+
+### Added
+- **Several connections per mailbox.** The mailbox settings have a new "Connections" field (1 to
+  10, default 1, as before). Message batches are handed to the connections from a shared queue, so
+  a single large folder gets faster too, not only many folders. On a test server that serves
+  4 MB/s per connection, 1,600 messages (48 MB) took 16 s with one connection, 9 s with two, 5.7 s
+  with four and 4.1 s with eight.
+  - No extra connections are opened: never more than there are batches.
+  - If the server does not allow that many connections, the download goes on with the ones that
+    opened. If a connection drops and cannot reconnect, the other connections finish its batch;
+    messages already downloaded are not requested again.
+  - Duplicate skipping works the same: each message is downloaded once, and Gmail's "All Mail" waits
+    until the regular folders are done, so messages stay in their label folders.
+  - "Stop mailbox" in the error dialog and the Stop button stop all of the mailbox's connections.
+- The download tests also run with three connections. New tests: the server's connection limit,
+  dropped connections, stopping and resuming, and duplicates across connections.
+
 ## [0.13.0] — 2026-10-17
 
 ### Added
