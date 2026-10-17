@@ -139,13 +139,14 @@ core/
   downloader.py         Per-mailbox download: batches over one or more connections, reconnects, skip-on-error
   storage.py            Local .eml archive layout
   mailparse.py          Robust MIME parsing (legacy Cyrillic encodings, attachments)
+  htmlclean.py          Cleans HTML messages before the viewer shows them (hidden text, remote pictures, scripts)
   mail_index.py         Cached message index for the viewer
   pst_writer.py         Pure-Python Unicode PST writer (NDB / LTP / messaging layers)
   pst_reader.py         Independent PST parser used for self-verification
   pst_export.py         .eml → PST conversion, splitting, duplicates, verification
   models.py             Mailbox model, settings, DPAPI password storage
   winpower.py           Keeps Windows awake and unthrottled while a download or export runs
-native/                 Optional Rust core (PyO3): IMAP download, PST writer, .eml parser, PST self-check
+native/                 Optional Rust core (PyO3): IMAP download, PST writer, .eml parser, HTML cleanup, PST self-check
   check.py              Compares the native core with the Python code on a real mailbox
 tests/                  Automated tests (unittest), fake IMAP server, tricky sample messages
 .github/workflows/      CI: tests in both modes, exe build, release on a v* tag

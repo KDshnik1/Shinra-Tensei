@@ -982,6 +982,12 @@ pub fn parse_full(raw: &[u8], forwarded: &str) -> Body {
     body
 }
 
+/// Письмо целиком для просмотрщика: .eml или .eml.gz с диска.
+pub fn parse_body(path: &Path, forwarded: &str) -> Result<Body, MailError> {
+    let (data, _, _) = read_file(path)?;
+    Ok(parse_full(&data, forwarded))
+}
+
 /// Текст письма для поиска в просмотрщике: обычный текст, иначе HTML без разметки
 /// (mailparse.search_text). Вложения не раскодируются — так в разы быстрее parse_full.
 pub fn search_text(path: &Path, forwarded: &str) -> Result<String, MailError> {
