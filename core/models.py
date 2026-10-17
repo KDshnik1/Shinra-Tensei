@@ -87,6 +87,7 @@ class Account:
     folder_raw: str = ""               # имя папки как на сервере (mUTF-7)
     folder_display: str = ""
     skip_duplicates: bool = True       # не качать письмо, которое уже есть в другой папке
+    connections: int = 1               # соединений с сервером при загрузке этого ящика
     archive_dir: str = ""              # своя папка для .eml; пусто — общая папка архива
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 

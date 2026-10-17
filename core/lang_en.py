@@ -5,6 +5,22 @@ Placeholders {name} / {0} must stay the same as in the key.
 """
 
 EN = {
+    'Сколько соединений с сервером открывать при загрузке этого ящика. Несколько соединений качают письма одновременно — это быстрее, если сервер ограничивает скорость одного соединения. Многие серверы не дают открыть больше 5–15 соединений на ящик (Gmail — 15), а соединения всех запущенных ящиков складываются. Если сервер откажет, загрузка продолжится теми соединениями, что открылись.':
+        'How many connections to the server to open when downloading this mailbox. Several connections download messages at the same time, which is faster when the server limits the speed of one connection. Many servers allow no more than 5–15 connections per mailbox (Gmail allows 15), and the connections of all running mailboxes add up. If the server refuses, the download continues with the connections that did open.',
+    '1 — обычная загрузка; больше — быстрее на медленных серверах':
+        '1 — normal download; more — faster on slow servers',
+    'Соединений:':
+        'Connections:',
+    'Подготовка: {0}':
+        'Preparing: {0}',
+    'Загрузка в {0} соединениях':
+        'Downloading over {0} connections',
+    'Соединение {0} не открылось ({e}) — работают остальные':
+        'Connection {0} did not open ({e}); continuing with the others',
+    'Соединение {0} закрыто из-за ошибки: {e}':
+        'Connection {0} closed after an error: {e}',
+    'Нет соединения с сервером':
+        'No connection to the server',
     '«{0}»: сервер не выдал Message-ID писем ({e}), повторы в этой папке не ищутся':
         '«{0}»: the server did not return Message-IDs ({e}), not looking for duplicates in this folder',
     'Повторов не записано':

@@ -9,6 +9,9 @@ folders: {имя: {"flags": [...], "messages": {uid: bytes}}}. Режимы (opt
   no_multi    — отвечать BAD на FETCH нескольких писем
   no_size     — отвечать BAD на запрос размеров
   no_msgid    — отвечать BAD на запрос заголовка Message-ID (размеры — как обычно)
+  max_conns   — не больше стольких соединений одновременно, лишним — BYE
+  bandwidth   — скорость выдачи писем одним соединением, байт/с (как у серверов с лимитом)
+state.max_active — сколько соединений было открыто одновременно (наибольшее).
 """
 import socket
 import socketserver
@@ -54,6 +57,21 @@ class _Handler(socketserver.StreamRequestHandler):
 
     def handle(self):
         st = self.server.state
+        with st.lock:
+            st.active += 1
+            st.max_active = max(st.max_active, st.active)
+            refuse = st.opt.get("max_conns") is not None and st.active > st.opt["max_conns"]
+        try:
+            if refuse:
+                self.w(b"* BYE too many connections\r\n")
+                self.wfile.flush()
+                return
+            self._session(st)
+        finally:
+            with st.lock:
+                st.active -= 1
+
+    def _session(self, st):
         opt = st.opt
         self.w(b"* OK fake IMAP ready\r\n")
         self.wfile.flush()
@@ -144,6 +162,8 @@ class _Handler(socketserver.StreamRequestHandler):
             else:
                 self.w(f"* {seq} FETCH (UID {u} FLAGS (\\Seen) INTERNALDATE {IDATE} "
                        f"BODY[] {{{len(body)}}}\r\n".encode() + body + b")\r\n")
+            if opt.get("bandwidth"):
+                time.sleep(len(body) / opt["bandwidth"])
             with st.lock:
                 st.bodies_sent += 1
         self.ok(tag)
@@ -157,6 +177,7 @@ class _State:
         self.dropped = False
         self.fetch_cmds = 0
         self.bodies_sent = 0
+        self.active = self.max_active = 0
         self.lock = threading.Lock()
 
 

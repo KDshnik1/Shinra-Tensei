@@ -2,6 +2,7 @@
 import shutil
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -44,11 +45,14 @@ class DownloadTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_dl(self, folders, skip_duplicates=False, **opt):
+    CONNECTIONS = 1
+
+    def run_dl(self, folders, skip_duplicates=False, connections=None, **opt):
         srv = FakeImapServer(folders, **opt)
         try:
             acc = Account(email="t@x", host="127.0.0.1", port=srv.port, security="none",
-                          login="u", password="p", skip_duplicates=skip_duplicates)
+                          login="u", password="p", skip_duplicates=skip_duplicates,
+                          connections=connections or self.CONNECTIONS)
             cb = CB()
             Downloader(acc, str(self.tmp), cb, threading.Event(), threading.Semaphore(1)).run()
             return cb, srv.state
@@ -172,6 +176,106 @@ class DownloadTest(unittest.TestCase):
         cb, _ = self.run_dl(f, skip_duplicates=False)
         self.check_all(f)
         self.assertEqual(cb.c, (53, 0, 0))
+
+
+class ParallelDownloadTest(DownloadTest):
+    """Несколько соединений на один ящик: все сценарии выше — с тремя соединениями, и свои."""
+    CONNECTIONS = 3
+
+    def flags_ok(self, folders):
+        for name, f in folders.items():
+            p = self.tmp.joinpath("t@x", *name.split("/"), "flags.txt")
+            lines = p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+            self.assertEqual(sorted(lines), sorted(f"{UIDVALIDITY}_{u}\t\\Seen"
+                                                   for u in f["messages"]), name)
+
+    def test_parallel_basic(self):
+        f = self.folders(450)
+        cb, st = self.run_dl(f, connections=4, latency=0.01)
+        self.assertEqual(cb.fin[0], "ok", cb.lines)
+        self.check_all(f)
+        self.flags_ok(f)
+        self.assertEqual(cb.c, (460, 0, 0))
+        self.assertEqual(cb.last, (460, 460))
+        self.assertGreaterEqual(st.max_active, 2)
+        self.assertLessEqual(st.max_active, 4)
+
+    def test_no_more_connections_than_batches(self):
+        f = {"INBOX": {"messages": {u: make_msg(u) for u in range(1, 31)}}}
+        cb, st = self.run_dl(f, connections=8)
+        self.check_all(f)
+        self.assertEqual(st.max_active, 1)              # одна пачка — одно соединение
+
+    def test_server_connection_limit(self):
+        f = self.folders(450)
+        cb, st = self.run_dl(f, connections=5, max_conns=2, latency=0.01)
+        self.assertEqual(cb.fin[0], "ok", cb.lines)
+        self.check_all(f)
+        self.flags_ok(f)
+        self.assertEqual(cb.c, (460, 0, 0))
+        self.assertTrue(any("не открылось" in l or "did not open" in l for l in cb.lines), cb.lines)
+
+    def test_parallel_connection_drop(self):
+        f = self.folders(450)
+        cb, _ = self.run_dl(f, connections=3, drop_after=150)
+        self.assertEqual(cb.fin[0], "ok", cb.lines)
+        self.check_all(f)
+        self.assertEqual(cb.c, (460, 0, 0))
+
+    def test_parallel_no_multi_and_missing(self):
+        f = self.folders(60)
+        cb, _ = self.run_dl(f, connections=3, no_multi=True, missing=(5, 17))
+        self.check_all(f, missing=(5, 17))
+        self.assertEqual(cb.c, (67, 0, 3))
+
+    def big_gmail(self):
+        inbox = {u: make_msg(u) for u in range(1, 251)}
+        work = {u: make_msg(1000 + u, "Work") for u in range(1, 121)}
+        allm = {i: b for i, b in enumerate(list(inbox.values()) + list(work.values()), 1)}
+        allm[900] = make_msg(5000, "Archive")
+        allm[901] = make_msg(5001, "Archive", msgid="")
+        return {"[Gmail]/All Mail": {"flags": ["\\All"], "messages": allm},
+                "INBOX": {"messages": inbox}, "Work": {"messages": work}}
+
+    def test_parallel_duplicates(self):
+        f = self.big_gmail()
+        for conns in (1, 4):
+            with self.subTest(connections=conns):
+                shutil.rmtree(self.tmp, ignore_errors=True)
+                cb, _ = self.run_dl(f, skip_duplicates=True, connections=conns)
+                self.assertEqual(cb.fin[0], "ok", cb.lines)
+                self.assertEqual(self.saved("INBOX"), f["INBOX"]["messages"])
+                self.assertEqual(self.saved("Work"), f["Work"]["messages"])
+                self.assertEqual(sorted(self.saved("[Gmail]/All Mail")), [900, 901])
+                self.assertEqual(cb.c, (372, 0, 0))
+                self.assertEqual(cb.last, (742, 742))
+
+    def test_stop(self):
+        f = self.folders(450)
+        srv = FakeImapServer(f, latency=0.01)
+        stop = threading.Event()
+        try:
+            acc = Account(email="t@x", host="127.0.0.1", port=srv.port, security="none",
+                          login="u", password="p", connections=4)
+            cb = CB()
+            t = threading.Thread(target=Downloader(acc, str(self.tmp), cb, stop,
+                                                   threading.Semaphore(1)).run)
+            t.start()
+            while not cb.c or cb.c[0] < 50:
+                if not t.is_alive():
+                    break
+                time.sleep(0.01)
+            stop.set()
+            t.join(30)
+            self.assertFalse(t.is_alive())
+            self.assertEqual(cb.fin[0], "stopped")
+        finally:
+            srv.close()
+        # повторный запуск докачивает остальное без повторов
+        cb, _ = self.run_dl(f, connections=4)
+        self.check_all(f)
+        self.flags_ok(f)
+        self.assertEqual(cb.c[0] + cb.c[1], 460)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ class MailboxArchive:
     def __init__(self, root, email: str):
         self.dir = Path(root) / safe_name(email.strip().lower(), 100)
         self._lock = threading.Lock()
+        self._flags_lock = threading.Lock()
 
     def load_meta(self) -> dict:
         p = self.dir / self.META
@@ -94,8 +95,8 @@ class MailboxArchive:
             # сервер не дал INTERNALDATE: дата из заголовков, а не момент загрузки
             ts = mailparse.received_from_bytes(body)
         msgfile.write_message(fdir / self.message_key(uidvalidity, uid), body, compress, ts)
-        with open(fdir / "flags.txt", "a", encoding="utf-8") as fh:
-            fh.write(f"{uidvalidity}_{uid}\t{flags}\n")
+        with self._flags_lock, open(fdir / "flags.txt", "a", encoding="utf-8") as fh:
+            fh.write(f"{uidvalidity}_{uid}\t{flags}\n")      # несколько соединений пишут сюда
 
 
 def load_flags(fdir: Path) -> dict:
