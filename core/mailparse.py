@@ -2,6 +2,7 @@
 (windows-1251 / koi8-r без объявления кодировки и т.п.)."""
 import codecs
 import email.message
+import html as html_mod
 import email.utils
 import os
 import re
@@ -237,6 +238,7 @@ if not os.environ.get("SHINRA_PURE_PYTHON"):
         NATIVE = hasattr(_native, "summarize")
     except ImportError:
         pass
+NATIVE_TEXT = NATIVE and hasattr(_native, "search_text")
 
 
 def summarize(path: Path, st=None) -> dict:
@@ -377,6 +379,23 @@ def parse_full(path: Path) -> Body:
     except RecursionError:     # сотни вложенных частей: что успели — сохраняем
         pass
     return body
+
+
+def html_to_text(h: str) -> str:
+    h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", h)
+    h = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", h)
+    h = re.sub(r"<[^>]+>", "", h)
+    return re.sub(r"\n{3,}", "\n\n", html_mod.unescape(h)).strip()
+
+
+def search_text(path) -> str:
+    """Текст письма для поиска: обычный текст, иначе HTML без разметки."""
+    if NATIVE_TEXT:
+        return _native.search_text(path)
+    body = parse_full(Path(path))
+    if body.text is not None:
+        return body.text
+    return html_to_text(body.html) if body.html else ""
 
 
 def sent_datetime(row) -> datetime | None:

@@ -377,6 +377,18 @@ fn parse_eml(py: Python<'_>, path: PathBuf, read: bool) -> PyResult<ParsedEml> {
     .map_err(|e| to_pyerr(py, e))
 }
 
+/// Текст письма для поиска (обычный текст или HTML без разметки) — без GIL.
+#[pyfunction]
+fn search_text(py: Python<'_>, path: PathBuf) -> PyResult<String> {
+    let fwd = tr(py, "Пересланное письмо");
+    py.allow_threads(|| {
+        guard(PARSE_PANIC, || {
+            mail::search_text(&path, &fwd).map_err(PstError::from)
+        })
+    })
+    .map_err(|e| to_pyerr(py, e))
+}
+
 #[pyfunction]
 fn summarize<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
     let fwd = tr(py, "Пересланное письмо");
@@ -461,6 +473,7 @@ fn shinra_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(summarize, m)?)?;
     m.add_class::<ParsedEml>()?;
     m.add_function(wrap_pyfunction!(parse_eml, m)?)?;
+    m.add_function(wrap_pyfunction!(search_text, m)?)?;
     m.add_function(wrap_pyfunction!(set_translator, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

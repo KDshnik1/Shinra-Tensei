@@ -982,6 +982,26 @@ pub fn parse_full(raw: &[u8], forwarded: &str) -> Body {
     body
 }
 
+/// Текст письма для поиска в просмотрщике: обычный текст, иначе HTML без разметки
+/// (mailparse.search_text). Вложения не раскодируются — так в разы быстрее parse_full.
+pub fn search_text(path: &Path, forwarded: &str) -> Result<String, MailError> {
+    let (data, _, _) = read_file(path)?;
+    let norm = universal_newlines(&data);
+    let msg = parse_message(&norm);
+    let (mut text, mut html) = (None, None);
+    for pi in iter_parts(&msg, forwarded) {
+        if pi.kind == Kind::Body {
+            let t = part_text(pi.part);
+            if pi.ctype == "text/html" {
+                html = Some(t);
+            } else {
+                text = Some(t);
+            }
+        }
+    }
+    Ok(text.unwrap_or_else(|| html.map(|h| html_to_text(&h)).unwrap_or_default()))
+}
+
 /// Заголовки письма: первые 512 КБ до пустой строки (+ \r\n\r\n), как _read_head.
 fn read_head(d: &[u8]) -> Vec<u8> {
     let data = &d[..d.len().min(512 * 1024)];

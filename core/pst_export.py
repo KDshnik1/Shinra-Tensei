@@ -8,7 +8,6 @@
 разбираются и записываются им — тот же результат, но в разы быстрее.
 """
 import email.utils
-import html as html_mod
 import json
 import os
 import re
@@ -70,13 +69,6 @@ def collect_tasks(mailbox_dir: Path):
     return tasks
 
 
-def _html_to_text(h: str) -> str:
-    h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", h)
-    h = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", h)
-    h = re.sub(r"<[^>]+>", "", h)
-    return re.sub(r"\n{3,}", "\n\n", html_mod.unescape(h)).strip()
-
-
 def _addr_list(s: str):
     return [(n, a) for n, a in email.utils.getaddresses([s]) if a or n]
 
@@ -89,7 +81,7 @@ def eml_to_message(eml: Path, read: bool) -> dict:
     recv_ft = filetime(info["received"]) if info.get("received") else sent_ft
     sender_name = info["from_name"] or info["from_addr"]
     subject = info["subject"]
-    text = body.text if body.text is not None else (_html_to_text(body.html) if body.html else "")
+    text = body.text if body.text is not None else (mailparse.html_to_text(body.html) if body.html else "")
 
     props = {
         0x001A001F: "IPM.Note",

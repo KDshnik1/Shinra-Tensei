@@ -1,6 +1,8 @@
 """Индекс писем архива для просмотрщика (кэшируется в index.json каждой папки)."""
+import gzip
 import json
 import os
+from bisect import bisect_right
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -123,6 +125,141 @@ def _summarize_all(todo, stop) -> dict | None:
                 return None
             out[name] = f.result()
     return out
+
+
+TEXT_INDEX = "text_index.gz"
+TEXT_VERSION = 1
+TEXT_MAX = 100_000          # символов текста одного письма для поиска
+_SEP = b"\x1e"              # между текстами писем; str.split() считает его пробелом,
+                            # поэтому ни в тексте, ни в запросе его нет
+
+
+def norm_text(t: str) -> str:
+    """Нижний регистр и одиночные пробелы: фраза находится и через перенос строки."""
+    return " ".join(t[:TEXT_MAX].split()).lower()
+
+
+def _text_or_empty(path: str) -> bytes:
+    try:
+        return norm_text(mailparse.search_text(path)).encode("utf-8")
+    except Exception:
+        return b""
+
+
+class TextIndex:
+    """Тексты писем для поиска: по папке один блок байт UTF-8 и начала писем в нём.
+    Поиск — bytes.find по блоку, без разбора на отдельные строки."""
+
+    def __init__(self):
+        self.parts = []             # (блок, [начало письма], [путь письма])
+
+    def add(self, blob: bytes, sizes, paths):
+        starts, pos = [], 0
+        for n in sizes:
+            starts.append(pos)
+            pos += n + len(_SEP)
+        self.parts.append((blob, starts, list(paths)))
+
+    def search(self, text: str) -> set:
+        """Пути писем, в тексте которых есть text."""
+        q = norm_text(text).encode("utf-8")
+        hits = set()
+        if not q:
+            return hits
+        for blob, starts, paths in self.parts:
+            pos = blob.find(q)
+            while pos != -1:
+                i = bisect_right(starts, pos) - 1
+                hits.add(paths[i])
+                if i + 1 >= len(starts):
+                    break
+                pos = blob.find(q, starts[i + 1])      # дальше — со следующего письма
+        return hits
+
+
+def _read_texts(d: str):
+    """(блок, {имя файла: (размер, mtime, начало, длина)}) из text_index.gz папки.
+    Формат: строка JSON со списком [имя, размер, mtime, длина текста в байтах],
+    затем тексты через _SEP."""
+    try:
+        with gzip.open(os.path.join(d, TEXT_INDEX), "rb") as fh:
+            meta = json.loads(fh.readline())
+            blob = fh.read()
+        if meta.get("v") != TEXT_VERSION:
+            return b"", {}
+        items, pos = {}, 0
+        for name, fsize, mtime, n in meta["items"]:
+            items[name] = (fsize, mtime, pos, n)
+            pos += n + len(_SEP)
+        if pos - len(_SEP) != len(blob) and items:
+            return b"", {}
+        return blob, items
+    except Exception:
+        return b"", {}
+
+
+def _write_texts(d: str, names, metas, texts) -> bytes:
+    blob = _SEP.join(texts)
+    try:
+        tmp = os.path.join(d, TEXT_INDEX + ".tmp")
+        meta = {"v": TEXT_VERSION,
+                "items": [[k, m[0], m[1], len(t)] for k, m, t in zip(names, metas, texts)]}
+        with gzip.open(tmp, "wb", compresslevel=1) as fh:
+            fh.write(json.dumps(meta, ensure_ascii=False).encode("utf-8") + b"\n")
+            fh.write(blob)
+        os.replace(tmp, os.path.join(d, TEXT_INDEX))
+    except Exception:
+        pass
+    return blob
+
+
+def load_texts(rows, stop=None, progress=None) -> TextIndex | None:
+    """Тексты писем из строк просмотрщика для поиска. Кэшируются в text_index.gz каждой
+    папки; заново разбираются только новые и изменённые письма (в несколько потоков).
+    progress(сделано, всего) — по ходу разбора. None — если остановили."""
+    by_dir = {}
+    for r in rows:
+        by_dir.setdefault(os.path.dirname(r["path"]), []).append(r)
+    caches, todo = {}, []
+    for d, rs in by_dir.items():
+        blob, items = caches[d] = _read_texts(d)
+        for r in rs:
+            c = items.get(r["file"])
+            if not (c and c[0] == r.get("fsize") and c[1] == r.get("mtime")):
+                todo.append(r)
+    fresh = {}
+    total = len(todo)
+    workers = min(8, os.cpu_count() or 2) if mailparse.NATIVE_TEXT else 1
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [(r, ex.submit(_text_or_empty, r["path"])) for r in todo]
+        for n, (r, f) in enumerate(futures, 1):
+            if stop is not None and stop():
+                for _r, g in futures:
+                    g.cancel()
+                return None
+            fresh[r["path"]] = f.result()
+            if progress is not None and (n % 200 == 0 or n == total):
+                progress(n, total)
+    index = TextIndex()
+    for d, rs in by_dir.items():
+        blob, items = caches[d]
+        if len(rs) == len(items) and not any(r["path"] in fresh for r in rs):
+            # папка не менялась: блок из файла как есть, в его порядке
+            order = sorted(items.items(), key=lambda kv: kv[1][2])
+            index.add(blob, [m[3] for _k, m in order], [os.path.join(d, k) for k, _m in order])
+            continue
+        names, metas, texts = [], [], []
+        for r in rs:
+            t = fresh.get(r["path"])
+            if t is None:
+                _fs, _mt, start, n = items[r["file"]]
+                t = blob[start:start + n]
+            names.append(r["file"])
+            metas.append((r.get("fsize"), r.get("mtime")))
+            texts.append(t)
+        index.add(_write_texts(d, names, metas, texts), [len(t) for t in texts],
+                  [r["path"] for r in rs])
+    return index
 
 
 def rename_in_index(fdir: Path, changes: dict):

@@ -5,6 +5,14 @@ Placeholders {name} / {0} must stay the same as in the key.
 """
 
 EN = {
+    'в тексте писем':
+        'in message text',
+    'Искать и в тексте писем. В первый раз папка индексируется, потом поиск быстрый':
+        'Also search the message text. The folder is indexed the first time; after that search is fast',
+    'Индексирую текст писем…':
+        'Indexing message text…',
+    'Индексирую текст писем: {0}':
+        'Indexing message text: {0}',
     'Сервер не выдаёт письма пачками ({e}), качаю по одному':
         'The server does not return messages in batches ({e}), downloading one at a time',
     '«{0}»: сервер не сообщил размеры писем ({e}), качаю небольшими пачками':

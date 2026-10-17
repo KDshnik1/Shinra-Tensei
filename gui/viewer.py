@@ -14,10 +14,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from core import msgfile
-from core.mail_index import all_mailboxes, load_folder, mailbox_folders
+from core.mail_index import all_mailboxes, load_folder, load_texts, mailbox_folders
 from core.mailparse import head_text, parse_full, sent_datetime
 from . import icons, theme
-from .common import run_bg
+from .common import progress_text, run_bg
 from core.i18n import DATETIME_FMT, QT_DATE_FMT, tr
 
 COLS = ["", tr('От'), tr('Кому'), tr('Тема'), tr('Отправлено'), tr('Получено'), tr('Размер'), tr('Папка')]
@@ -151,6 +151,7 @@ class MessageFilter(QSortFilterProxyModel):
     def __init__(self):
         super().__init__()
         self.text = ""
+        self.hits = None           # пути писем, где запрос найден в тексте (или None)
         self.dfrom = self.dto = None
         self.by = "received"
 
@@ -158,13 +159,15 @@ class MessageFilter(QSortFilterProxyModel):
         # сортирует исходная модель; прокси только фильтрует и сохраняет её порядок
         self.sourceModel().sort(column, order)
 
-    def update(self, text, dfrom, dto, by):
+    def update(self, text, dfrom, dto, by, hits=None):
         self.text, self.dfrom, self.dto, self.by = text.lower().strip(), dfrom, dto, by
+        self.hits = hits
         self.invalidateFilter()
 
     def filterAcceptsRow(self, src_row, parent):
         r = self.sourceModel().rows[src_row]
-        if self.text and self.text not in r["_search"]:
+        if self.text and self.text not in r["_search"] and not (
+                self.hits is not None and r["path"] in self.hits):
             return False
         if self.dfrom or self.dto:
             dt = r["_recv_local"] if self.by == "received" else r["_sent_local"]
@@ -204,6 +207,11 @@ class ViewerWindow(QDialog):
                             Qt.WindowType.WindowMinimizeButtonHint)
         self.resize(1300, 820)
         self._load_token = 0
+        self._texts = None             # TextIndex текущей папки
+        self._texts_token = None       # для какой загрузки папки он собран
+        self._texts_progress = None    # [сделано, всего] — пишет фоновый поток
+        self._texts_timer = QTimer(self, interval=300)
+        self._texts_timer.timeout.connect(self._show_texts_progress)
         self._body = None
         self._current = None
         self._build()
@@ -240,6 +248,11 @@ class ViewerWindow(QDialog):
         self._filter_timer.timeout.connect(self._apply_filter)
         self.ed_search.textChanged.connect(self._filter_timer.start)
         fl.addWidget(self.ed_search, 2)
+        self.chk_body = QCheckBox(tr('в тексте писем'))
+        self.chk_body.setToolTip(tr('Искать и в тексте писем. В первый раз папка индексируется, '
+                                    'потом поиск быстрый'))
+        self.chk_body.toggled.connect(self._body_toggled)
+        fl.addWidget(self.chk_body)
         self.chk_date = QCheckBox(tr('Дата'))
         self.chk_date.toggled.connect(self._apply_filter)
         self.cb_by = QComboBox()
@@ -383,6 +396,7 @@ class ViewerWindow(QDialog):
         self._load_token += 1
         token = self._load_token
         self.model.set_rows([])
+        self._texts = None             # тексты прошлой папки больше не нужны
         self._show_message(None)
         self.lbl_count.setText(tr('Загрузка списка писем…'))
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
@@ -402,6 +416,8 @@ class ViewerWindow(QDialog):
                 return
             self.model.set_rows(rows)
             self._update_count()
+            if self.chk_body.isChecked():
+                self._load_texts()
 
         def fail(err):
             QApplication.restoreOverrideCursor()
@@ -415,8 +431,56 @@ class ViewerWindow(QDialog):
             w.setEnabled(on)
         dfrom = self.de_from.date().toPython() if on else None
         dto = self.de_to.date().toPython() if on else None
-        self.proxy.update(self.ed_search.text(), dfrom, dto, self.cb_by.currentData())
-        self._update_count()
+        text = self.ed_search.text()
+        hits = None
+        if (text.strip() and self.chk_body.isChecked()
+                and self._texts_token == self._load_token and self._texts is not None):
+            hits = self._texts.search(text)
+        self.proxy.update(text, dfrom, dto, self.cb_by.currentData(), hits)
+        if self._texts_progress is None:
+            self._update_count()
+
+    # ---------- поиск по тексту писем ----------
+    def _body_toggled(self, on):
+        if on and self._texts_token != self._load_token:
+            self._load_texts()
+        self._apply_filter()
+
+    def _load_texts(self):
+        if self._texts_progress is not None or not self.model.rows:
+            return
+        token = self._load_token
+        rows = self.model.rows
+        prog = self._texts_progress = [0, 0]
+        self.lbl_count.setText(tr('Индексирую текст писем…'))
+        self._texts_timer.start()
+
+        def job():
+            def progress(n, total):
+                prog[0], prog[1] = n, total
+            return load_texts(rows, stop=lambda: token != self._load_token, progress=progress)
+
+        def finish():
+            self._texts_progress = None
+            self._texts_timer.stop()
+
+        def done(texts):
+            finish()
+            if texts is not None and token == self._load_token:
+                self._texts, self._texts_token = texts, token
+            self._apply_filter()
+            if self.chk_body.isChecked() and token != self._load_token:
+                self._load_texts()        # пока индексировали, выбрали другую папку
+
+        def fail(err):
+            finish()
+            self.lbl_count.setText(tr('Ошибка: {err}').format(err=err))
+        run_bg(job, done, fail)
+
+    def _show_texts_progress(self):
+        p = self._texts_progress
+        if p and p[1]:
+            self.lbl_count.setText(tr('Индексирую текст писем: {0}').format(progress_text(p[0], p[1])))
 
     def _update_count(self):
         total, shown = self.model.rowCount(), self.proxy.rowCount()
