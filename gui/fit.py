@@ -39,7 +39,7 @@ class ColumnFitter(QObject):
     def min_width(self, c) -> int:
         hh = self.view.horizontalHeader()
         head = hh.sectionSizeFromContents(c).width() + PAD
-        return max(self.cols[c][3], min(head, 160))
+        return max(self.cols[c][3], head)
 
     def base_widths(self) -> list:
         out = []
