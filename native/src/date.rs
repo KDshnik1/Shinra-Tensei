@@ -232,9 +232,8 @@ fn month_days(y: i64, m: i64) -> i64 {
     }
 }
 
-/// Время из заголовка Date в секундах эпохи (UTC, если пояс не указан).
-/// None — Python бросил бы исключение (дата не разобрана или некорректна).
-pub fn sent_timestamp(value: &str) -> Option<i64> {
+/// Проверки datetime(...) и timezone(...) Python: (год, мес, день, ч, мин, сек, смещение).
+fn checked(value: &str) -> Option<(i64, i64, i64, i64, i64, i64, i64)> {
     let (y, mo, d, h, mi, s, off) = parsedate_tz(value)?;
     if !(1..=9999).contains(&y) || !(1..=12).contains(&mo) || d < 1 || d > month_days(y, mo) {
         return None;
@@ -246,5 +245,23 @@ pub fn sent_timestamp(value: &str) -> Option<i64> {
     if off.abs() >= 86400 {
         return None; // datetime.timezone: смещение строго меньше суток
     }
+    Some((y, mo, d, h, mi, s, off))
+}
+
+/// parsedate_to_datetime(value).isoformat() (без пояса — UTC), как mailparse.summarize.
+pub fn sent_iso(value: &str) -> Option<String> {
+    let (y, mo, d, h, mi, s, off) = checked(value)?;
+    let (sign, a) = if off < 0 { ('-', -off) } else { ('+', off) };
+    Some(format!(
+        "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}{sign}{:02}:{:02}",
+        a / 3600,
+        a % 3600 / 60
+    ))
+}
+
+/// Время из заголовка Date в секундах эпохи (UTC, если пояс не указан).
+/// None — Python бросил бы исключение (дата не разобрана или некорректна).
+pub fn sent_timestamp(value: &str) -> Option<i64> {
+    let (y, mo, d, h, mi, s, off) = checked(value)?;
     Some(days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s - off)
 }

@@ -5,7 +5,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QSortFilterProxyModel, Qt,
-                            QUrl)
+                            QTimer, QUrl)
 from PySide6.QtGui import QImage, QTextDocument
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit,
                                QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -14,15 +14,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from core import msgfile
-from core.mail_index import all_mailboxes, load_folder, mailbox_folders
+from core.mail_index import all_mailboxes, load_folders, load_texts, mailbox_folders
 from core.mailparse import head_text, parse_full, sent_datetime
 from . import icons, theme
-from .common import run_bg
+from .common import progress_text, run_bg
 from core.i18n import DATETIME_FMT, QT_DATE_FMT, tr
 
 COLS = ["", tr('От'), tr('Кому'), tr('Тема'), tr('Отправлено'), tr('Получено'), tr('Размер'), tr('Папка')]
 C_ATT, C_FROM, C_TO, C_SUBJ, C_SENT, C_RECV, C_SIZE, C_FOLDER = range(8)
-SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 def human_size(n: int) -> str:
@@ -37,21 +36,67 @@ def fmt_dt(dt: datetime | None) -> str:
     return dt.strftime(DATETIME_FMT) if dt else ""
 
 
+def _sort_key(c):
+    if c == C_ATT:
+        return lambda r: int(r.get("attach") or 0)
+    if c == C_SENT:
+        return lambda r: r["_sent_ts"] or 0.0
+    if c == C_RECV:
+        return lambda r: float(r.get("received") or 0)
+    if c == C_SIZE:
+        return lambda r: r.get("size", 0)
+    if c == C_FROM:
+        return lambda r: (r.get("from_name") or r.get("from_addr") or r.get("from", "")).lower()
+    if c == C_TO:
+        return lambda r: r.get("to", "").lower()
+    if c == C_SUBJ:
+        return lambda r: (r.get("subject") or tr('(без темы)')).lower()
+    return lambda r: r.get("folder", "").lower()
+
+
+def prepare_rows(rows):
+    """Готовые для таблицы даты и строка поиска. Вызывается в фоновом потоке вместе
+    с загрузкой папки, чтобы окно не замирало на десятках тысяч писем."""
+    for r in rows:
+        sdt = sent_datetime(r)
+        r["_sent_local"] = sdt.astimezone() if sdt else None
+        r["_sent_ts"] = sdt.timestamp() if sdt else None
+        r["_recv_local"] = datetime.fromtimestamp(r["received"]) if r.get("received") else None
+        r["_search"] = " ".join((r.get("from", ""), r.get("to", ""), r.get("cc", ""),
+                                 r.get("subject", ""))).lower()
+    return rows
+
+
 class MessageModel(QAbstractTableModel):
+    """Сортирует сама (list.sort по готовому ключу): сортировка в QSortFilterProxyModel
+    вызывала data() из Python на каждое сравнение — на 20 000 писем это 10–17 секунд."""
+
     def __init__(self):
         super().__init__()
         self.rows = []
+        self._sort = (C_RECV, Qt.SortOrder.DescendingOrder)
+
+    def _sort_rows(self):
+        col, order = self._sort
+        self.rows.sort(key=_sort_key(col), reverse=order == Qt.SortOrder.DescendingOrder)
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        self._sort = (column, order)
+        self.layoutAboutToBeChanged.emit()
+        old = self.persistentIndexList()
+        old_rows = [self.rows[i.row()] for i in old]
+        self._sort_rows()
+        pos = {id(r): n for n, r in enumerate(self.rows)}
+        self.changePersistentIndexList(
+            old, [self.index(pos[id(r)], i.column()) for r, i in zip(old_rows, old)])
+        self.layoutChanged.emit()
 
     def set_rows(self, rows):
+        if rows and "_search" not in rows[0]:
+            prepare_rows(rows)
         self.beginResetModel()
-        for r in rows:
-            sdt = sent_datetime(r)
-            r["_sent_local"] = sdt.astimezone() if sdt else None
-            r["_sent_ts"] = sdt.timestamp() if sdt else None
-            r["_recv_local"] = datetime.fromtimestamp(r["received"]) if r.get("received") else None
-            r["_search"] = " ".join((r.get("from", ""), r.get("to", ""), r.get("cc", ""),
-                                     r.get("subject", ""))).lower()
         self.rows = rows
+        self._sort_rows()
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -88,13 +133,6 @@ class MessageModel(QAbstractTableModel):
                 C_SIZE: human_size(r.get("size", 0)),
                 C_FOLDER: r.get("folder", ""),
             }[c]
-        if role == SORT_ROLE:
-            return {
-                C_ATT: int(r.get("attach") or 0),
-                C_SENT: r["_sent_ts"] or 0.0,
-                C_RECV: float(r.get("received") or 0),
-                C_SIZE: r.get("size", 0),
-            }.get(c, (self.data(index) or "").lower())
         if role == Qt.ItemDataRole.DecorationRole and c == C_ATT and r.get("attach"):
             return icons.paperclip(theme.color("text"))
         if role == Qt.ItemDataRole.ToolTipRole and c == C_ATT and r.get("attach"):
@@ -112,18 +150,24 @@ class MessageModel(QAbstractTableModel):
 class MessageFilter(QSortFilterProxyModel):
     def __init__(self):
         super().__init__()
-        self.setSortRole(SORT_ROLE)
         self.text = ""
+        self.hits = None           # пути писем, где запрос найден в тексте (или None)
         self.dfrom = self.dto = None
         self.by = "received"
 
-    def update(self, text, dfrom, dto, by):
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        # сортирует исходная модель; прокси только фильтрует и сохраняет её порядок
+        self.sourceModel().sort(column, order)
+
+    def update(self, text, dfrom, dto, by, hits=None):
         self.text, self.dfrom, self.dto, self.by = text.lower().strip(), dfrom, dto, by
+        self.hits = hits
         self.invalidateFilter()
 
     def filterAcceptsRow(self, src_row, parent):
         r = self.sourceModel().rows[src_row]
-        if self.text and self.text not in r["_search"]:
+        if self.text and self.text not in r["_search"] and not (
+                self.hits is not None and r["path"] in self.hits):
             return False
         if self.dfrom or self.dto:
             dt = r["_recv_local"] if self.by == "received" else r["_sent_local"]
@@ -163,6 +207,11 @@ class ViewerWindow(QDialog):
                             Qt.WindowType.WindowMinimizeButtonHint)
         self.resize(1300, 820)
         self._load_token = 0
+        self._texts = None             # TextIndex текущей папки
+        self._texts_token = None       # для какой загрузки папки он собран
+        self._texts_progress = None    # [сделано, всего] — пишет фоновый поток
+        self._texts_timer = QTimer(self, interval=300)
+        self._texts_timer.timeout.connect(self._show_texts_progress)
         self._body = None
         self._current = None
         self._build()
@@ -194,8 +243,16 @@ class ViewerWindow(QDialog):
         fl = QHBoxLayout()
         self.ed_search = QLineEdit(placeholderText=tr('Поиск: отправитель, получатель, тема…'))
         self.ed_search.setClearButtonEnabled(True)
-        self.ed_search.textChanged.connect(self._apply_filter)
+        # фильтр — после паузы в наборе, а не на каждую букву
+        self._filter_timer = QTimer(self, singleShot=True, interval=200)
+        self._filter_timer.timeout.connect(self._apply_filter)
+        self.ed_search.textChanged.connect(self._filter_timer.start)
         fl.addWidget(self.ed_search, 2)
+        self.chk_body = QCheckBox(tr('в тексте писем'))
+        self.chk_body.setToolTip(tr('Искать и в тексте писем. В первый раз папка индексируется, '
+                                    'потом поиск быстрый'))
+        self.chk_body.toggled.connect(self._body_toggled)
+        fl.addWidget(self.chk_body)
         self.chk_date = QCheckBox(tr('Дата'))
         self.chk_date.toggled.connect(self._apply_filter)
         self.cb_by = QComboBox()
@@ -339,18 +396,15 @@ class ViewerWindow(QDialog):
         self._load_token += 1
         token = self._load_token
         self.model.set_rows([])
+        self._texts = None             # тексты прошлой папки больше не нужны
         self._show_message(None)
         self.lbl_count.setText(tr('Загрузка списка писем…'))
         QApplication.setOverrideCursor(Qt.CursorShape.BusyCursor)
 
         def job():
-            rows = []
-            for f in folders:
-                if token != self._load_token:
-                    return None
-                rows += load_folder(Path(f["dir"]), f["display"],
-                                    stop=lambda: token != self._load_token)
-            return rows
+            rows = load_folders([(f["dir"], f["display"]) for f in folders],
+                                stop=lambda: token != self._load_token)
+            return None if token != self._load_token else prepare_rows(rows)
 
         def done(rows):
             QApplication.restoreOverrideCursor()
@@ -358,6 +412,8 @@ class ViewerWindow(QDialog):
                 return
             self.model.set_rows(rows)
             self._update_count()
+            if self.chk_body.isChecked():
+                self._load_texts()
 
         def fail(err):
             QApplication.restoreOverrideCursor()
@@ -371,8 +427,56 @@ class ViewerWindow(QDialog):
             w.setEnabled(on)
         dfrom = self.de_from.date().toPython() if on else None
         dto = self.de_to.date().toPython() if on else None
-        self.proxy.update(self.ed_search.text(), dfrom, dto, self.cb_by.currentData())
-        self._update_count()
+        text = self.ed_search.text()
+        hits = None
+        if (text.strip() and self.chk_body.isChecked()
+                and self._texts_token == self._load_token and self._texts is not None):
+            hits = self._texts.search(text)
+        self.proxy.update(text, dfrom, dto, self.cb_by.currentData(), hits)
+        if self._texts_progress is None:
+            self._update_count()
+
+    # ---------- поиск по тексту писем ----------
+    def _body_toggled(self, on):
+        if on and self._texts_token != self._load_token:
+            self._load_texts()
+        self._apply_filter()
+
+    def _load_texts(self):
+        if self._texts_progress is not None or not self.model.rows:
+            return
+        token = self._load_token
+        rows = self.model.rows
+        prog = self._texts_progress = [0, 0]
+        self.lbl_count.setText(tr('Индексирую текст писем…'))
+        self._texts_timer.start()
+
+        def job():
+            def progress(n, total):
+                prog[0], prog[1] = n, total
+            return load_texts(rows, stop=lambda: token != self._load_token, progress=progress)
+
+        def finish():
+            self._texts_progress = None
+            self._texts_timer.stop()
+
+        def done(texts):
+            finish()
+            if texts is not None and token == self._load_token:
+                self._texts, self._texts_token = texts, token
+            self._apply_filter()
+            if self.chk_body.isChecked() and token != self._load_token:
+                self._load_texts()        # пока индексировали, выбрали другую папку
+
+        def fail(err):
+            finish()
+            self.lbl_count.setText(tr('Ошибка: {err}').format(err=err))
+        run_bg(job, done, fail)
+
+    def _show_texts_progress(self):
+        p = self._texts_progress
+        if p and p[1]:
+            self.lbl_count.setText(tr('Индексирую текст писем: {0}').format(progress_text(p[0], p[1])))
 
     def _update_count(self):
         total, shown = self.model.rowCount(), self.proxy.rowCount()

@@ -982,6 +982,26 @@ pub fn parse_full(raw: &[u8], forwarded: &str) -> Body {
     body
 }
 
+/// Текст письма для поиска в просмотрщике: обычный текст, иначе HTML без разметки
+/// (mailparse.search_text). Вложения не раскодируются — так в разы быстрее parse_full.
+pub fn search_text(path: &Path, forwarded: &str) -> Result<String, MailError> {
+    let (data, _, _) = read_file(path)?;
+    let norm = universal_newlines(&data);
+    let msg = parse_message(&norm);
+    let (mut text, mut html) = (None, None);
+    for pi in iter_parts(&msg, forwarded) {
+        if pi.kind == Kind::Body {
+            let t = part_text(pi.part);
+            if pi.ctype == "text/html" {
+                html = Some(t);
+            } else {
+                text = Some(t);
+            }
+        }
+    }
+    Ok(text.unwrap_or_else(|| html.map(|h| html_to_text(&h)).unwrap_or_default()))
+}
+
 /// Заголовки письма: первые 512 КБ до пустой строки (+ \r\n\r\n), как _read_head.
 fn read_head(d: &[u8]) -> Vec<u8> {
     let data = &d[..d.len().min(512 * 1024)];
@@ -1123,7 +1143,8 @@ fn read_file(path: &Path) -> io::Result<(Vec<u8>, f64, u64)> {
         } else {
             meta.len()
         };
-        let mut out = Vec::with_capacity(size as usize);
+        // ISIZE из повреждённого файла может быть любым (до 4 ГБ) — это лишь подсказка
+        let mut out = Vec::with_capacity((size as usize).min(raw.len().saturating_mul(16)));
         flate2::read::MultiGzDecoder::new(&raw[..]).read_to_end(&mut out)?;
         Ok((out, mtime, size))
     } else {
@@ -1131,7 +1152,6 @@ fn read_file(path: &Path) -> io::Result<(Vec<u8>, f64, u64)> {
     }
 }
 
-/// pst_export.eml_to_message: письмо -> свойства PST.
 const MIN_TS: i64 = 315_532_800; // 01.01.1980: всё, что раньше, — заведомо неверная дата
 
 /// mailparse._hdr_ts: время из даты заголовка, если она разобрана и правдоподобна.
@@ -1158,6 +1178,72 @@ fn header_received(hh: &Headers) -> Option<i64> {
         .or_else(|| hh.get("Date").and_then(hdr_ts))
 }
 
+/// mailparse.summarize: краткие сведения о письме для списка в просмотрщике.
+pub struct Summary {
+    pub from: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub to: String,
+    pub cc: String,
+    pub subject: String,
+    pub msgid: String,
+    pub sent: Option<String>,
+    pub received: i64,
+    pub size: u64,
+    pub fsize: u64,
+    pub mtime: i64,
+    pub att_names: Vec<String>,
+}
+
+pub fn summarize(path: &Path, forwarded: &str) -> Result<Summary, MailError> {
+    let fsize = fs::metadata(path)?.len();
+    let (data, mtime, size) = read_file(path)?;
+    let head = read_head(&data);
+    let hh = header_only(&head);
+    let hdr = |n: &str| hh.get(n).map(decode_hdr_raw).unwrap_or_default();
+    let frm = hdr("From");
+    let (from_name, from_addr) = addr::parseaddr(&frm);
+    let sent = hh
+        .get("Date")
+        .filter(|v| v.is_ascii())
+        .and_then(|v| date::sent_iso(std::str::from_utf8(v).unwrap()));
+    // вложения: только если письмо не простой текст/HTML (как в Python-версии)
+    let norm = universal_newlines(&data);
+    let msg = parse_message(&norm);
+    let ctype = msg.content_type();
+    let mut att_names = Vec::new();
+    if ctype.starts_with("multipart/") || (ctype != "text/plain" && ctype != "text/html") {
+        for pi in iter_parts(&msg, forwarded) {
+            if pi.kind == Kind::Attachment {
+                att_names.push(if pi.fname.is_empty() {
+                    pi.ctype
+                } else {
+                    pi.fname
+                });
+            }
+        }
+    }
+    Ok(Summary {
+        to: hdr("To"),
+        cc: hdr("Cc"),
+        subject: hdr("Subject"),
+        msgid: hh
+            .get("Message-ID")
+            .map(|v| py_strip(&decode_bytes(v, None)).to_string())
+            .unwrap_or_default(),
+        sent,
+        received: header_received(&hh).unwrap_or(mtime.trunc() as i64),
+        size,
+        fsize,
+        mtime: mtime.trunc() as i64,
+        att_names,
+        from: frm,
+        from_name,
+        from_addr,
+    })
+}
+
+/// pst_export.eml_to_message: письмо -> свойства PST.
 pub fn eml_to_message(path: &Path, read: bool, forwarded: &str) -> Result<Message, MailError> {
     let (data, mtime, size) = read_file(path)?;
     // summarize()

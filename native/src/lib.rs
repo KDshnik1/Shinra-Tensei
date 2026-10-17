@@ -268,6 +268,25 @@ impl PstFile {
         .map_err(|e| to_pyerr(py, e))
     }
 
+    /// Записать письмо, разобранное parse_eml() (в другом потоке). Возвращает дату получения.
+    fn add_parsed(
+        &mut self,
+        py: Python<'_>,
+        folder_nid: u32,
+        mut msg: PyRefMut<'_, ParsedEml>,
+    ) -> PyResult<i64> {
+        let m = msg
+            .m
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("message is already written"))?;
+        let w = self.writer()?;
+        py.allow_threads(|| {
+            let received = m.received;
+            guard(WRITE_PANIC, || w.add_message(folder_nid, m)).map(|_| received)
+        })
+        .map_err(|e| to_pyerr(py, e))
+    }
+
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         let w = self
             .w
@@ -337,6 +356,75 @@ fn eml_to_message<'py>(py: Python<'py>, path: PathBuf, read: bool) -> PyResult<B
     Ok(d)
 }
 
+/// То же, что core.mailparse.summarize(): сведения о письме для просмотрщика (без GIL).
+/// Разобранное письмо: parse_eml() готовит его в рабочем потоке, PstFile.add_parsed()
+/// записывает. Так письма разбираются на нескольких ядрах, а пишутся по порядку.
+#[pyclass(module = "shinra_core")]
+struct ParsedEml {
+    m: Option<Message>,
+}
+
+/// Разобрать .eml / .eml.gz для записи в PST — целиком без GIL.
+#[pyfunction]
+fn parse_eml(py: Python<'_>, path: PathBuf, read: bool) -> PyResult<ParsedEml> {
+    let fwd = tr(py, "Пересланное письмо");
+    py.allow_threads(|| {
+        guard(PARSE_PANIC, || {
+            mail::eml_to_message(&path, read, &fwd).map_err(PstError::from)
+        })
+    })
+    .map(|m| ParsedEml { m: Some(m) })
+    .map_err(|e| to_pyerr(py, e))
+}
+
+/// Текст письма для поиска (обычный текст или HTML без разметки) — без GIL.
+#[pyfunction]
+fn search_text(py: Python<'_>, path: PathBuf) -> PyResult<String> {
+    let fwd = tr(py, "Пересланное письмо");
+    py.allow_threads(|| {
+        guard(PARSE_PANIC, || {
+            mail::search_text(&path, &fwd).map_err(PstError::from)
+        })
+    })
+    .map_err(|e| to_pyerr(py, e))
+}
+
+#[pyfunction]
+fn summarize<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
+    let fwd = tr(py, "Пересланное письмо");
+    let s = py
+        .allow_threads(|| {
+            guard(PARSE_PANIC, || {
+                mail::summarize(&path, &fwd).map_err(PstError::from)
+            })
+        })
+        .map_err(|e| to_pyerr(py, e))?;
+    let d = PyDict::new(py);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    d.set_item("file", name)?;
+    d.set_item("from", s.from)?;
+    d.set_item("from_name", s.from_name)?;
+    d.set_item("from_addr", s.from_addr)?;
+    d.set_item("to", s.to)?;
+    d.set_item("cc", s.cc)?;
+    d.set_item("subject", s.subject)?;
+    d.set_item("msgid", s.msgid)?;
+    d.set_item("sent", s.sent)?;
+    d.set_item("received", s.received)?;
+    d.set_item("size", s.size)?;
+    d.set_item("fsize", s.fsize)?;
+    d.set_item("mtime", s.mtime)?;
+    d.set_item("attach", s.att_names.len())?;
+    d.set_item(
+        "att_names",
+        s.att_names.into_iter().take(10).collect::<Vec<_>>(),
+    )?;
+    Ok(d)
+}
+
 /// То же, что core.pst_reader.verify(): полная проверка файла, сводка {папка: писем}.
 #[pyfunction]
 fn verify<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
@@ -382,6 +470,10 @@ fn shinra_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PstFile>()?;
     m.add_function(wrap_pyfunction!(pst_crc, m)?)?;
     m.add_function(wrap_pyfunction!(eml_to_message, m)?)?;
+    m.add_function(wrap_pyfunction!(summarize, m)?)?;
+    m.add_class::<ParsedEml>()?;
+    m.add_function(wrap_pyfunction!(parse_eml, m)?)?;
+    m.add_function(wrap_pyfunction!(search_text, m)?)?;
     m.add_function(wrap_pyfunction!(set_translator, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

@@ -149,6 +149,73 @@ def parse_fetch_response(data):
     return body, flags, idate
 
 
+def uid_set(uids) -> str:
+    """«1:5,7,9:12» — UID подряд сворачиваются в диапазоны. В диапазон попадают только числа,
+    которые все есть в списке, поэтому лишних писем сервер не пришлёт."""
+    nums = sorted({int(u) for u in uids})
+    out = []
+    i = 0
+    while i < len(nums):
+        j = i
+        while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+            j += 1
+        out.append(str(nums[i]) if i == j else f"{nums[i]}:{nums[j]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def _uid_chunks(uids, limit=4000):
+    """UID-наборы не длиннее limit символов: длинную команду сервер может отвергнуть."""
+    nums = sorted({int(u) for u in uids})
+    chunk, size = [], 0
+    for n in nums:
+        chunk.append(n)
+        size += len(str(n)) + 1
+        if size >= limit:
+            yield uid_set(chunk)
+            chunk, size = [], 0
+    if chunk:
+        yield uid_set(chunk)
+
+
+_RESP_START = re.compile(rb"\s*\d+\s+\(")
+_UID = re.compile(rb"\bUID\s+(\d+)", re.IGNORECASE)
+
+
+def _split_fetch(data):
+    """Ответ imaplib на FETCH нескольких писем -> [(метаданные, тело | None)] по письму.
+    Каждое письмо начинается с «N (…»; литерал тела приходит кортежем, остаток строки
+    (например, « FLAGS (\\Seen))») — отдельными байтами."""
+    msgs = []
+    for part in data:
+        if isinstance(part, tuple):
+            head, lit = part[0], part[1]
+        elif isinstance(part, bytes):
+            head, lit = part, None
+        else:
+            continue
+        if _RESP_START.match(head) or not msgs:
+            msgs.append([b"", None])
+        m = msgs[-1]
+        m[0] += head + b" "
+        if lit is not None and m[1] is None and b"BODY[" in head.upper():
+            m[1] = lit
+    return msgs
+
+
+def parse_fetch_many(data) -> dict:
+    """{uid: (тело, флаги, internaldate)} для писем, у которых сервер прислал тело."""
+    out = {}
+    for meta, body in _split_fetch(data):
+        m = _UID.search(meta)
+        if body is None or not m:
+            continue
+        f = re.search(rb"FLAGS \(([^)]*)\)", meta)
+        out[m.group(1).decode()] = (body, f.group(1).decode("utf-8", "replace") if f else "",
+                                    parse_internaldate(meta))
+    return out
+
+
 class ImapConnection:
     def __init__(self, account):
         self.acc = account
@@ -231,3 +298,28 @@ class ImapConnection:
         if typ != "OK":
             raise ImapError(tr('Сервер отказал в выдаче письма: {data}').format(data=data))
         return parse_fetch_response(data)
+
+    def fetch_sizes(self, uids) -> dict:
+        """{uid: размер письма в байтах} одной-двумя командами — чтобы набирать пачки."""
+        out = {}
+        for chunk in _uid_chunks(uids):
+            typ, data = self.M.uid("FETCH", chunk, "(UID RFC822.SIZE)")
+            if typ != "OK":
+                raise ImapError(tr('Сервер отказал в выдаче письма: {data}').format(data=data))
+            for part in data:
+                meta = part[0] if isinstance(part, tuple) else part
+                if not isinstance(meta, bytes):
+                    continue
+                u = _UID.search(meta)
+                z = re.search(rb"RFC822\.SIZE\s+(\d+)", meta, re.IGNORECASE)
+                if u and z:
+                    out[u.group(1).decode()] = int(z.group(1))
+        return out
+
+    def fetch_many(self, uids) -> dict:
+        """Несколько писем одной командой: {uid: (тело, флаги, internaldate)}. Письма, которых
+        нет в ответе, вызывающий докачивает по одному."""
+        typ, data = self.M.uid("FETCH", uid_set(uids), "(UID INTERNALDATE FLAGS BODY.PEEK[])")
+        if typ != "OK":
+            raise ImapError(tr('Сервер отказал в выдаче письма: {data}').format(data=data))
+        return parse_fetch_many(data)

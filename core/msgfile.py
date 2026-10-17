@@ -51,6 +51,31 @@ def list_messages(fdir: Path) -> list:
     return list(found.values())
 
 
+def scan_messages(fdir: Path) -> list:
+    """Как list_messages, но с os.stat каждого файла: [(имя, путь строкой, stat)]. В Windows
+    сведения о файле приходят вместе со списком папки, отдельного обращения к диску не нужно.
+    Пути строками, а не Path: на десятках тысяч писем это заметно быстрее."""
+    if not fdir.exists():
+        return []
+    found = {}
+    with os.scandir(fdir) as it:
+        for e in it:
+            low = e.name.lower()
+            if not (low.endswith(PACKED) or low.endswith(PLAIN)):
+                continue
+            try:
+                if not e.is_file():
+                    continue
+                st = e.stat()
+            except OSError:
+                continue
+            packed = low.endswith(PACKED)
+            k = e.name[:-len(PACKED if packed else PLAIN)]
+            if packed or k not in found:
+                found[k] = (e.name, e.path, st)
+    return list(found.values())
+
+
 def existing_keys(fdir: Path) -> set:
     return {msg_key(p) for p in list_messages(fdir)}
 

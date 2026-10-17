@@ -8,20 +8,26 @@
 разбираются и записываются им — тот же результат, но в разы быстрее.
 """
 import email.utils
-import html as html_mod
 import json
 import os
 import re
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import mailparse, msgfile
+from . import mailparse, msgfile, pst_writer
 from .pst_reader import verify
 from .pst_writer import NATIVE, NID_IPM_SUBTREE, PstFile, filetime
 from .storage import load_flags, safe_name
 from .i18n import DATE_FMT, DATETIME_FMT, dec, num, tr
 
 GB = 1024 ** 3
+# Нативное ядро разбирает письма в нескольких потоках (без GIL), а пишет их по порядку.
+PARALLEL_PARSE = NATIVE and hasattr(pst_writer._native, "parse_eml")
+PARSE_THREADS = max(1, min(4, (os.cpu_count() or 2) - 1))
+PARSE_AHEAD = 4 * PARSE_THREADS     # столько писем разбирается заранее (держатся в памяти)
+PARSE_AHEAD_BYTES = 64 * 1024 * 1024  # и не больше стольких байт файлов писем
 DEFAULT_SPLIT_GB = 10               # размер одной части по умолчанию
 MIN_SPLIT_GB, MAX_SPLIT_GB = 0.5, 50   # 50 ГБ — предел Unicode PST в Outlook
 
@@ -63,13 +69,6 @@ def collect_tasks(mailbox_dir: Path):
     return tasks
 
 
-def _html_to_text(h: str) -> str:
-    h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", h)
-    h = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", h)
-    h = re.sub(r"<[^>]+>", "", h)
-    return re.sub(r"\n{3,}", "\n\n", html_mod.unescape(h)).strip()
-
-
 def _addr_list(s: str):
     return [(n, a) for n, a in email.utils.getaddresses([s]) if a or n]
 
@@ -82,7 +81,7 @@ def eml_to_message(eml: Path, read: bool) -> dict:
     recv_ft = filetime(info["received"]) if info.get("received") else sent_ft
     sender_name = info["from_name"] or info["from_addr"]
     subject = info["subject"]
-    text = body.text if body.text is not None else (_html_to_text(body.html) if body.html else "")
+    text = body.text if body.text is not None else (mailparse.html_to_text(body.html) if body.html else "")
 
     props = {
         0x001A001F: "IPM.Note",
@@ -226,6 +225,38 @@ def write_report(report_path: Path, display_name: str, parts: list, split_bytes:
     return report_path
 
 
+def _parse_ahead(pool, emls, flags, stop_event):
+    """(eml, прочитано, future с разобранным письмом | None) по порядку. С нативным ядром
+    следующие PARSE_AHEAD писем разбираются в пуле, пока текущее пишется в PST."""
+    items = ((eml, "\\seen" in flags.get(msgfile.msg_key(eml), "").lower()) for eml in emls)
+    if pool is None:
+        for eml, read in items:
+            yield eml, read, None
+        return
+    ahead = deque()
+    size = 0
+    try:
+        for eml, read in items:
+            try:
+                n = eml.stat().st_size
+            except OSError:
+                n = 0
+            ahead.append((eml, read, pool.submit(pst_writer._native.parse_eml, eml, read), n))
+            size += n
+            while len(ahead) > PARSE_AHEAD or (len(ahead) > 1 and size > PARSE_AHEAD_BYTES):
+                eml0, read0, f0, n0 = ahead.popleft()
+                size -= n0
+                yield eml0, read0, f0
+            if stop_event.is_set():
+                break
+        while ahead:
+            eml0, read0, f0, _n = ahead.popleft()
+            yield eml0, read0, f0
+    finally:
+        for _e, _r, f, _n in ahead:
+            f.cancel()
+
+
 def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
                    cb, stop_event, password: str = "", split_gb: float = DEFAULT_SPLIT_GB):
     """cb: log(str), progress(done, total), stage(str) — необязательно.
@@ -289,6 +320,7 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
     open_part()
     ok = errors = done = 0
     cb.progress(0, total)
+    pool = ThreadPoolExecutor(PARSE_THREADS, thread_name_prefix="parse") if PARALLEL_PARSE else None
     try:
         for info, fdir, emls in tasks:
             if stop_event.is_set():
@@ -299,7 +331,7 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
             folder_nid(segs)
             cb.log(tr('Папка «{0}»: {1} писем').format(info['display'], _fmt_n(len(emls))))
             flags = load_flags(fdir)
-            for eml in emls:
+            for eml, read, parsed in _parse_ahead(pool, emls, flags, stop_event):
                 if stop_event.is_set():
                     break
                 try:
@@ -311,8 +343,9 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
                     close_part()
                     open_part()
                 try:
-                    read = "\\seen" in flags.get(msgfile.msg_key(eml), "").lower()
-                    if NATIVE:
+                    if parsed is not None:
+                        received = state["pst"].add_parsed(folder_nid(segs), parsed.result())
+                    elif NATIVE:
                         received = state["pst"].add_eml(folder_nid(segs), eml, read)
                     else:
                         msg = eml_to_message(eml, read)
@@ -334,6 +367,9 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
         if state.get("pst") is not None:
             state["pst"].abort()
         raise
+    finally:
+        if pool is not None:
+            pool.shutdown(cancel_futures=True)
 
     for path in files:
         stage(tr('Проверка файла {0}…').format(path.name))

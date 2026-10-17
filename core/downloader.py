@@ -10,6 +10,24 @@ from .storage import MailboxArchive
 from .i18n import tr
 
 MAX_AUTO_RECONNECTS = 3
+BATCH_COUNT = 100              # писем в одной команде FETCH
+BATCH_BYTES = 16 * 1024 * 1024 # и не больше стольких байт (письма держатся в памяти)
+UNKNOWN_SIZE = 1024 * 1024     # размер, если сервер его не назвал
+
+
+def make_batches(uids, sizes):
+    """Режет список UID на пачки по числу писем и суммарному размеру. Большое письмо
+    уходит отдельной пачкой."""
+    batch, total = [], 0
+    for u in uids:
+        z = sizes.get(u, UNKNOWN_SIZE)
+        if batch and (len(batch) >= BATCH_COUNT or total + z > BATCH_BYTES):
+            yield batch
+            batch, total = [], 0
+        batch.append(u)
+        total += z
+    if batch:
+        yield batch
 
 
 class StopRequested(Exception):
@@ -47,6 +65,7 @@ class Downloader:
         self.conn = None
         self.current_folder = None
         self.skip_all = False
+        self.batches = True            # качать пачками, пока сервер не откажет
         self.downloaded = self.already = self.errors = 0
 
     # ---------- служебное ----------
@@ -195,11 +214,49 @@ class Downloader:
                 done += len(todo)
                 self.cb.progress(done, total)
                 continue
-            for uid in todo:
+            try:
+                sizes = self._with_reconnect(lambda: self.conn.fetch_sizes(todo))
+            except StopRequested:
+                raise
+            except Exception as e:
+                self.cb.log(tr('«{0}»: сервер не сообщил размеры писем ({e}), качаю небольшими пачками').format(f.display, e=e))
+                sizes = {}
+            for batch in make_batches(todo, sizes):
                 self._check_stop()
-                self._download_one(f, uv, fdir, uid)
-                done += 1
-                self.cb.progress(done, total)
+                for _uid in self._download_batch(f, uv, fdir, batch):
+                    done += 1
+                    self.cb.progress(done, total)
+
+    def _download_batch(self, folder, uv, fdir, batch):
+        """Качает пачку одной командой; после каждого письма отдаёт его UID. Письма, которые
+        не пришли в ответе или не сохранились, докачиваются по одному — с переподключением
+        и вопросом пользователю, как раньше."""
+        got = {}
+        if len(batch) > 1 and self.batches:
+            try:
+                got = self._with_reconnect(lambda: self.conn.fetch_many(batch))
+            except StopRequested:
+                raise
+            except Exception as e:
+                if not is_connection_error(e):
+                    # сервер не понимает FETCH нескольких писем — дальше по одному
+                    self.batches = False
+                    self.cb.log(tr('Сервер не выдаёт письма пачками ({e}), качаю по одному').format(e=e))
+        for uid in batch:
+            item = got.pop(uid, None)
+            saved = False
+            if item is not None:
+                try:
+                    self.archive.save_message(fdir, uv, uid, *item, self.compress)
+                    saved = True
+                except Exception:
+                    pass
+            if saved:
+                self.downloaded += 1
+                self._counters()
+            else:
+                self._download_one(folder, uv, fdir, uid)
+            yield uid
 
     def _download_one(self, folder, uv, fdir, uid):
         auto = 0
