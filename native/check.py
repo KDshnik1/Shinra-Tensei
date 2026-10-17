@@ -127,7 +127,8 @@ def main():
     uuid.uuid4 = real_uuid4
     same = (tmp / "python.pst").read_bytes() == (tmp / "rust.pst").read_bytes()
     print(f"2. Запись PST: файлы {'совпадают побайтно' if same else 'РАЗЛИЧАЮТСЯ'}. "
-          f"Python {tp:.1f} с, Rust {tr_:.1f} с")
+          f"Python {tp:.1f} с, Rust {tr_:.1f} с (здесь Rust получает письма из Python и тратит время "
+          f"на перевод данных; при экспорте он разбирает .eml сам, и запись быстрее)")
 
     # 3. самопроверка
     t = time.perf_counter()

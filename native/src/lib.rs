@@ -268,6 +268,25 @@ impl PstFile {
         .map_err(|e| to_pyerr(py, e))
     }
 
+    /// Записать письмо, разобранное parse_eml() (в другом потоке). Возвращает дату получения.
+    fn add_parsed(
+        &mut self,
+        py: Python<'_>,
+        folder_nid: u32,
+        mut msg: PyRefMut<'_, ParsedEml>,
+    ) -> PyResult<i64> {
+        let m = msg
+            .m
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("message is already written"))?;
+        let w = self.writer()?;
+        py.allow_threads(|| {
+            let received = m.received;
+            guard(WRITE_PANIC, || w.add_message(folder_nid, m)).map(|_| received)
+        })
+        .map_err(|e| to_pyerr(py, e))
+    }
+
     fn close(&mut self, py: Python<'_>) -> PyResult<()> {
         let w = self
             .w
@@ -338,6 +357,26 @@ fn eml_to_message<'py>(py: Python<'py>, path: PathBuf, read: bool) -> PyResult<B
 }
 
 /// То же, что core.mailparse.summarize(): сведения о письме для просмотрщика (без GIL).
+/// Разобранное письмо: parse_eml() готовит его в рабочем потоке, PstFile.add_parsed()
+/// записывает. Так письма разбираются на нескольких ядрах, а пишутся по порядку.
+#[pyclass(module = "shinra_core")]
+struct ParsedEml {
+    m: Option<Message>,
+}
+
+/// Разобрать .eml / .eml.gz для записи в PST — целиком без GIL.
+#[pyfunction]
+fn parse_eml(py: Python<'_>, path: PathBuf, read: bool) -> PyResult<ParsedEml> {
+    let fwd = tr(py, "Пересланное письмо");
+    py.allow_threads(|| {
+        guard(PARSE_PANIC, || {
+            mail::eml_to_message(&path, read, &fwd).map_err(PstError::from)
+        })
+    })
+    .map(|m| ParsedEml { m: Some(m) })
+    .map_err(|e| to_pyerr(py, e))
+}
+
 #[pyfunction]
 fn summarize<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
     let fwd = tr(py, "Пересланное письмо");
@@ -420,6 +459,8 @@ fn shinra_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pst_crc, m)?)?;
     m.add_function(wrap_pyfunction!(eml_to_message, m)?)?;
     m.add_function(wrap_pyfunction!(summarize, m)?)?;
+    m.add_class::<ParsedEml>()?;
+    m.add_function(wrap_pyfunction!(parse_eml, m)?)?;
     m.add_function(wrap_pyfunction!(set_translator, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
