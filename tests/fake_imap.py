@@ -11,15 +11,27 @@ folders: {имя: {"flags": [...], "messages": {uid: bytes}}}. Режимы (opt
   no_msgid    — отвечать BAD на запрос заголовка Message-ID (размеры — как обычно)
   max_conns   — не больше стольких соединений одновременно, лишним — BYE
   bandwidth   — скорость выдачи писем одним соединением, байт/с (как у серверов с лимитом)
-state.max_active — сколько соединений было открыто одновременно (наибольшее).
+  tls         — "ssl" (сразу TLS) или "starttls"; сертификат самоподписанный (tests/tls)
+state.max_active — сколько соединений было открыто одновременно (наибольшее);
+state.cmds — порядок запросов писем: "size", "meta" (с Message-ID) или "body".
 """
+import base64
 import socket
 import socketserver
+import ssl
 import threading
 import time
+from pathlib import Path
 
 UIDVALIDITY = "777"
 IDATE = '"05-Jan-2015 10:00:00 +0300"'
+CERT = Path(__file__).with_name("tls") / "selfsigned.pem"
+
+
+def _tls_context():
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(CERT)
+    return ctx
 
 
 def _parse_set(s, have):
@@ -49,6 +61,22 @@ def _header_field(msg: bytes, name: bytes) -> bytes:
 
 
 class _Handler(socketserver.StreamRequestHandler):
+    def setup(self):
+        if self.server.state.opt.get("tls") == "ssl":
+            self.request = self.connection = _tls_context().wrap_socket(self.request, server_side=True)
+        super().setup()
+
+    def finish(self):
+        super().finish()
+        if isinstance(self.request, ssl.SSLSocket):
+            self.request.close()          # исходный сокет сервер закроет сам, обёртку — нет
+
+    def starttls(self):
+        self.wfile.flush()
+        self.request = self.connection = _tls_context().wrap_socket(self.request, server_side=True)
+        self.rfile = self.connection.makefile("rb", self.rbufsize)
+        self.wfile = socketserver._SocketWriter(self.connection)
+
     def w(self, b):
         self.wfile.write(b)
 
@@ -85,10 +113,21 @@ class _Handler(socketserver.StreamRequestHandler):
             cmd = cmd.upper()
             if opt.get("latency"):
                 time.sleep(opt["latency"])
+            if cmd == "STARTTLS" and opt.get("tls") == "starttls":
+                self.ok(tag, "begin TLS")
+                self.starttls()
+                continue
             if cmd == "CAPABILITY":
-                self.w(b"* CAPABILITY IMAP4rev1 AUTH=PLAIN\r\n")
+                tls = " STARTTLS" if opt.get("tls") == "starttls" else ""
+                self.w(f"* CAPABILITY IMAP4rev1 AUTH=PLAIN{tls}\r\n".encode())
                 self.ok(tag)
             elif cmd == "LOGIN":
+                st.auth.append(("LOGIN", args))
+                self.ok(tag, "logged in")
+            elif cmd == "AUTHENTICATE":
+                self.w(b"+ \r\n")
+                self.wfile.flush()
+                st.auth.append(("PLAIN", base64.b64decode(self.rfile.readline().strip())))
                 self.ok(tag, "logged in")
             elif cmd == "LIST":
                 for name, f in st.folders.items():
@@ -124,6 +163,8 @@ class _Handler(socketserver.StreamRequestHandler):
         uids = _parse_set(sset, have)
         up = items.upper()
         if "BODY.PEEK[]" not in up:                     # размеры / Message-ID
+            with st.lock:
+                st.cmds.append("meta" if "MESSAGE-ID" in up else "size")
             if opt.get("no_size") or (opt.get("no_msgid") and "MESSAGE-ID" in up):
                 self.w(f"{tag} BAD not supported\r\n".encode())
                 return True
@@ -142,6 +183,7 @@ class _Handler(socketserver.StreamRequestHandler):
             return True
         with st.lock:
             st.fetch_cmds += 1
+            st.cmds.append("body")
         for u in uids:
             with st.lock:
                 drop = (opt.get("drop_after") is not None and not st.dropped
@@ -178,6 +220,8 @@ class _State:
         self.fetch_cmds = 0
         self.bodies_sent = 0
         self.active = self.max_active = 0
+        self.cmds = []
+        self.auth = []                  # («LOGIN», аргументы) или («PLAIN», b"\0логин\0пароль")
         self.lock = threading.Lock()
 
 
@@ -190,6 +234,9 @@ class FakeImapServer(socketserver.ThreadingTCPServer):
         self.state = _State(folders, opt)
         self._t = threading.Thread(target=self.serve_forever, daemon=True)
         self._t.start()
+
+    def handle_error(self, request, client_address):
+        pass                            # клиент отверг сертификат и т. п. — без трассировки в выводе
 
     @property
     def port(self):

@@ -4,16 +4,19 @@
 //! иначе работает на чистом Python. Тяжёлая работа идёт без GIL, поэтому
 //! несколько экспортов в разных потоках действительно выполняются параллельно.
 
+use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyKeyError, PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 mod addr;
 mod date;
+mod download;
+mod imap;
 mod mail;
 mod pst;
 mod reader;
@@ -24,6 +27,18 @@ create_exception!(
     PstCheckError,
     PyException,
     "Файл PST не прошёл самопроверку."
+);
+create_exception!(
+    shinra_core,
+    ImapError,
+    PyException,
+    "Ошибка IMAP-сервера или подключения."
+);
+create_exception!(
+    shinra_core,
+    TlsError,
+    ImapError,
+    "TLS-соединение не установлено (сервер может знать только старые версии TLS)."
 );
 
 use pst::{Message, Props, PstError, Val, Writer};
@@ -46,6 +61,30 @@ fn tr(py: Python<'_>, text: &str) -> String {
         return s;
     }
     text.to_string()
+}
+
+/// tr() для кода без GIL (загрузчик): переводы не меняются, поэтому кэшируются.
+pub(crate) fn t(text: &str) -> String {
+    static CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+    if let Some(s) = CACHE.lock().unwrap().as_ref().and_then(|c| c.get(text)) {
+        return s.clone();
+    }
+    let s = Python::with_gil(|py| tr(py, text));
+    CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(text.to_string(), s.clone());
+    s
+}
+
+/// str.format() для переведённого шаблона: «{0}», «{e}» и т. п. -> значения.
+pub(crate) fn fmt_args(template: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
+    let mut out = template.to_string();
+    for (k, v) in args {
+        out = out.replace(&format!("{{{k}}}"), &v.to_string());
+    }
+    out
 }
 
 fn to_pyerr(py: Python<'_>, e: PstError) -> PyErr {
@@ -463,6 +502,173 @@ fn verify<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
     }
 }
 
+// ---------------------------------------------------------------- загрузка почты
+
+/// Связь загрузчика с Python: объект с методами status, progress, log, counters, ask,
+/// stopped, request_stop, archive_keys (его даёт core.downloader). Ошибки в этих методах
+/// загрузку не прерывают.
+struct PyHost(Py<PyAny>);
+
+impl PyHost {
+    fn call(&self, name: &str, args: impl for<'py> IntoPyObject<'py, Target = PyTuple>) {
+        Python::with_gil(|py| {
+            if let Err(e) = self.0.call_method1(py, name, args) {
+                e.print(py);
+            }
+        });
+    }
+}
+
+impl download::Host for PyHost {
+    fn status(&self, text: &str) {
+        self.call("status", (text,));
+    }
+
+    fn progress(&self, done: u64, total: u64) {
+        self.call("progress", (done, total));
+    }
+
+    fn log(&self, text: &str) {
+        self.call("log", (text,));
+    }
+
+    fn counters(&self, downloaded: u64, already: u64, errors: u64) {
+        self.call("counters", (downloaded, already, errors));
+    }
+
+    fn ask(&self, folder: &str, uid: u64, error: &str, details: &str) -> download::Answer {
+        use download::Answer;
+        let a = Python::with_gil(|py| {
+            self.0
+                .call_method1(py, "ask", (folder, uid.to_string(), error, details))
+                .and_then(|r| r.extract::<String>(py))
+                .unwrap_or_else(|e| {
+                    e.print(py);
+                    "skip".into()
+                })
+        });
+        match a.as_str() {
+            "retry" => Answer::Retry,
+            "skip_all" => Answer::SkipAll,
+            "stop" => Answer::Stop,
+            _ => Answer::Skip,
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        Python::with_gil(|py| {
+            self.0
+                .call_method0(py, "stopped")
+                .and_then(|r| r.is_truthy(py))
+                .unwrap_or(false)
+        })
+    }
+
+    fn request_stop(&self) {
+        self.call("request_stop", ());
+    }
+
+    fn archive_keys(&self) -> HashSet<download::Key> {
+        Python::with_gil(|py| {
+            self.0
+                .call_method0(py, "archive_keys")
+                .and_then(|r| r.extract::<Vec<(String, u64)>>(py))
+                .map(|v| v.into_iter().collect())
+                .unwrap_or_else(|e| {
+                    e.print(py);
+                    HashSet::new()
+                })
+        })
+    }
+}
+
+fn item<'py, T: FromPyObject<'py>>(d: &Bound<'py, PyDict>, key: &str, default: T) -> PyResult<T> {
+    match d.get_item(key)? {
+        Some(v) if !v.is_none() => v.extract(),
+        _ => Ok(default),
+    }
+}
+
+fn server_from(d: &Bound<'_, PyDict>) -> PyResult<imap::Server> {
+    Ok(imap::Server {
+        host: item(d, "host", String::new())?.trim().to_string(),
+        port: item(d, "port", 993u16)?,
+        security: item(d, "security", "ssl".to_string())?,
+        accept_all_certs: item(d, "accept_all_certs", false)?,
+        user: item(d, "user", String::new())?,
+        password: item(d, "password", String::new())?,
+    })
+}
+
+fn imap_pyerr(e: imap::Error) -> PyErr {
+    match e {
+        imap::Error::Tls(m) => TlsError::new_err(m),
+        e => ImapError::new_err(e.to_string()),
+    }
+}
+
+/// Загрузить ящик (то же, что Downloader._run). params — настройки ящика, host — связь с
+/// программой. Возвращает {"result": ok|stop|error|tls, "message", "downloaded", "already",
+/// "errors"}; tls — TLS не установлен при первом подключении (Python-модуль попробует сам).
+#[pyfunction]
+#[pyo3(name = "download")]
+fn download_mailbox<'py>(
+    py: Python<'py>,
+    params: &Bound<'py, PyDict>,
+    host: Py<PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let d = params;
+    let acc = download::Account {
+        server: server_from(d)?,
+        security_text: item(d, "security_text", String::new())?,
+        date_mode: item(d, "date_mode", "all".to_string())?,
+        date_from: item(d, "date_from", String::new())?,
+        date_to: item(d, "date_to", String::new())?,
+        folder_mode: item(d, "folder_mode", "all".to_string())?,
+        folder_raw: item(d, "folder_raw", String::new())?,
+        folder_display: item(d, "folder_display", String::new())?,
+        connections: item(d, "connections", 1usize)?,
+        duplicates: item(d, "duplicates", "auto".to_string())?,
+        compress: item(d, "compress", false)?,
+        mailbox_dir: item(d, "mailbox_dir", PathBuf::new())?,
+        thousands: item(d, "thousands", " ".to_string())?,
+    };
+    let host = PyHost(host);
+    let (counts, result) = py.allow_threads(|| download::download(&host, &acc));
+    let out = PyDict::new(py);
+    let (kind, msg) = match result {
+        Ok(()) => ("ok", String::new()),
+        Err(imap::Error::Stop) => ("stop", String::new()),
+        Err(imap::Error::Tls(m)) if counts.downloaded == 0 => ("tls", m),
+        Err(e) => ("error", format!("{}: {e}", e.kind())),
+    };
+    out.set_item("result", kind)?;
+    out.set_item("message", msg)?;
+    out.set_item("downloaded", counts.downloaded)?;
+    out.set_item("already", counts.already)?;
+    out.set_item("errors", counts.errors)?;
+    Ok(out)
+}
+
+/// Папка для Python: (raw, display, delimiter, flags).
+type FolderRow = (String, String, String, Vec<String>);
+
+/// Список папок сервера: [(raw, display, delimiter, flags)]. Ошибки — ImapError / TlsError.
+#[pyfunction]
+fn imap_list_folders(py: Python<'_>, params: &Bound<'_, PyDict>) -> PyResult<Vec<FolderRow>> {
+    let srv = server_from(params)?;
+    let r = py.allow_threads(|| {
+        catch_unwind(AssertUnwindSafe(|| download::list_folders(&srv)))
+            .unwrap_or_else(|_| Err(imap::Error::Imap(t("внутренняя ошибка загрузки"))))
+    });
+    r.map(|v| {
+        v.into_iter()
+            .map(|f| (f.raw, f.display, f.delimiter, f.flags))
+            .collect()
+    })
+    .map_err(imap_pyerr)
+}
+
 #[pymodule]
 fn shinra_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PstCheckError", m.py().get_type::<PstCheckError>())?;
@@ -475,6 +681,10 @@ fn shinra_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_eml, m)?)?;
     m.add_function(wrap_pyfunction!(search_text, m)?)?;
     m.add_function(wrap_pyfunction!(set_translator, m)?)?;
+    m.add("ImapError", m.py().get_type::<ImapError>())?;
+    m.add("TlsError", m.py().get_type::<TlsError>())?;
+    m.add_function(wrap_pyfunction!(download_mailbox, m)?)?;
+    m.add_function(wrap_pyfunction!(imap_list_folders, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

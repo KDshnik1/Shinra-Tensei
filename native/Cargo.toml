@@ -2,7 +2,7 @@
 name = "shinra_core"
 version = "0.1.0"
 edition = "2024"
-description = "Native core of Shinra Tensei: PST writer and .eml parser"
+description = "Native core of Shinra Tensei: IMAP download, PST writer and .eml parser"
 license = "MIT"
 
 [lib]
@@ -19,6 +19,10 @@ htmlize = { version = "1.1.0", features = ["unescape"] }
 memchr = "2.8.3"
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"] }
 regex = "1.13.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [profile.release]
 lto = true

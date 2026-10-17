@@ -1,17 +1,18 @@
 """Окно настройки почтового ящика."""
 import copy
+import html
 import os
 from datetime import date
 from pathlib import Path
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDateEdit, QDialog,
-                               QDialogButtonBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
+                               QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
-                               QSpinBox, QVBoxLayout)
+                               QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from core.downloader import MAX_CONNECTIONS
-from core.imap_client import ImapConnection
+from core.imap_client import server_folders
 from core.models import SECURITY_OPTIONS, Account
 from core.storage import safe_name
 from . import theme
@@ -25,13 +26,18 @@ class AccountDialog(QDialog):
         self.default_archive = default_archive
         self.account = copy.deepcopy(account) if account else Account()
         self.setWindowTitle(tr('Изменить почтовый ящик') if account else tr('Добавить почтовый ящик'))
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(600)
         self._build()
         self._load(self.account)
 
     # ---------- интерфейс ----------
     def _build(self):
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self.pages = QStackedWidget()
+        outer.addWidget(self.pages)
+        page1 = QWidget()
+        lay = QVBoxLayout(page1)
+        lay.setContentsMargins(0, 0, 0, 0)
 
         g = QGroupBox(tr('Подключение к серверу'))
         f = QFormLayout(g)
@@ -64,17 +70,6 @@ class AccountDialog(QDialog):
         f.addRow(tr('Логин:'), self.ed_login)
         f.addRow(tr('Пароль:'), hpw)
         f.addRow("", self.chk_save)
-        self.sp_conns = QSpinBox(minimum=1, maximum=MAX_CONNECTIONS, value=1)
-        self.sp_conns.setToolTip(tr(
-            'Сколько соединений с сервером открывать при загрузке этого ящика. Несколько соединений '
-            'качают письма одновременно — это быстрее, если сервер ограничивает скорость одного '
-            'соединения. Многие серверы не дают открыть больше 5–15 соединений на ящик (Gmail — 15), '
-            'а соединения всех запущенных ящиков складываются. Если сервер откажет, загрузка '
-            'продолжится теми соединениями, что открылись.'))
-        hc = QHBoxLayout()
-        hc.addWidget(self.sp_conns)
-        hc.addWidget(QLabel(tr('1 — обычная загрузка; больше — быстрее на медленных серверах')), 1)
-        f.addRow(tr('Соединений:'), hc)
         lay.addWidget(g)
 
         g = QGroupBox(tr('Период'))
@@ -115,10 +110,6 @@ class AccountDialog(QDialog):
         h.addWidget(self.btn_folders)
         v.addWidget(self.rb_all_folders)
         v.addLayout(h)
-        self.chk_dups = QCheckBox(tr('Не загружать повторы писем из других папок (например, «Вся почта» в Gmail)'))
-        self.chk_dups.setToolTip(tr('Письмо с тем же Message-ID и размером, что уже есть в архиве '
-                                    'ящика, второй раз не скачивается'))
-        v.addWidget(self.chk_dups)
         self.rb_one_folder.toggled.connect(self._sync_enabled)
         lay.addWidget(g)
 
@@ -149,21 +140,153 @@ class AccountDialog(QDialog):
         self.lbl_info = QLabel()
         self.lbl_info.setWordWrap(True)
         lay.addWidget(self.lbl_info)
+        lay.addStretch(1)
+        self.pages.addWidget(page1)
+        self.pages.addWidget(self._build_method_page())
 
         h = QHBoxLayout()
         self.btn_test = QPushButton(tr('Проверить подключение'))
         self.btn_test.clicked.connect(self._test)
         h.addWidget(self.btn_test)
+        self.btn_back = QPushButton(tr('‹ Назад'))
+        self.btn_back.clicked.connect(lambda: self._show_page(0))
+        h.addWidget(self.btn_back)
         h.addStretch()
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
-                              QDialogButtonBox.StandardButton.Cancel)
-        bb.button(QDialogButtonBox.StandardButton.Ok).setText(tr('Сохранить'))
-        bb.button(QDialogButtonBox.StandardButton.Ok).setObjectName("Primary")
-        bb.button(QDialogButtonBox.StandardButton.Cancel).setText(tr('Отмена'))
-        bb.accepted.connect(self._accept)
-        bb.rejected.connect(self.reject)
-        h.addWidget(bb)
-        lay.addLayout(h)
+        self.btn_next = QPushButton(tr('Далее ›'), objectName="Primary")
+        self.btn_next.setDefault(True)
+        self.btn_next.clicked.connect(self._next)
+        h.addWidget(self.btn_next)
+        self.btn_save = QPushButton(tr('Сохранить'), objectName="Primary")
+        self.btn_save.clicked.connect(self._accept)
+        h.addWidget(self.btn_save)
+        b = QPushButton(tr('Отмена'))
+        b.clicked.connect(self.reject)
+        h.addWidget(b)
+        outer.addLayout(h)
+        self._show_page(0)
+
+    # ---------- вторая страница: как выкачивать почту ----------
+    @staticmethod
+    def _option(radio: QRadioButton, about: str, pros: list, cons: list, extra=None):
+        """Вариант: переключатель (и, если есть, своё поле рядом), под ним — что это,
+        плюсы и минусы."""
+        box = QVBoxLayout()
+        box.setSpacing(2)
+        top = QHBoxLayout()
+        top.addWidget(radio)
+        if extra is not None:
+            top.addWidget(extra)
+        top.addStretch()
+        box.addLayout(top)
+        muted = theme.color("text_muted")
+        ok, bad = theme.status_color("ok"), theme.status_color("error")
+        lines = [html.escape(about)] if about else []
+        lines += [f"<span style='color:{ok}'>＋</span> {html.escape(p)}" for p in pros]
+        lines += [f"<span style='color:{bad}'>−</span> {html.escape(c)}" for c in cons]
+        lbl = QLabel("<br>".join(lines))
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet(f"color:{muted}")
+        h = QHBoxLayout()
+        h.setContentsMargins(24, 0, 0, 8)         # отступ через раскладку: поля в стиле ломают
+        h.addWidget(lbl, 1)                       # расчёт высоты переносимого текста
+        box.addLayout(h)
+        return box
+
+    def _build_method_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 4, 0)
+        title = QLabel(tr('Как выкачивать почту'))
+        title.setStyleSheet("font-size: 15px; font-weight: 600;")
+        lay.addWidget(title)
+
+        g = QGroupBox(tr('Соединения с сервером'))
+        v = QVBoxLayout(g)
+        self.rb_one_conn = QRadioButton(tr('Одно соединение'))
+        self.rb_many_conn = QRadioButton(tr('Несколько соединений:'))
+        bg = QButtonGroup(self)
+        bg.addButton(self.rb_one_conn)
+        bg.addButton(self.rb_many_conn)
+        self.sp_conns = QSpinBox(minimum=2, maximum=MAX_CONNECTIONS, value=4)
+        self.rb_many_conn.toggled.connect(self.sp_conns.setEnabled)
+        v.addLayout(self._option(
+            self.rb_one_conn, tr('Письма запрашиваются по одному соединению, пачками.'),
+            [tr('Работает с любым сервером и не упирается в его ограничения.'),
+             tr('Бережно к серверу; несколько ящиков, запущенных сразу, не мешают друг другу.')],
+            [tr('Медленнее на серверах, которые ограничивают скорость одного соединения '
+                '(mail.ru, Яндекс, Exchange).')]))
+        v.addLayout(self._option(
+            self.rb_many_conn, tr('Пачки писем раздаются нескольким соединениям и качаются одновременно.'),
+            [tr('В несколько раз быстрее, если сервер ограничивает скорость одного соединения: '
+                'в проверке 4 соединения скачали почту в 2,8 раза быстрее одного.'),
+             tr('Ускоряется и одна большая папка, а не только много папок.')],
+            [tr('Серверы ограничивают число соединений на ящик (Gmail — 15, другие — часто 5–10), '
+                'а соединения всех запущенных ящиков складываются. Лишние сервер отклонит — загрузка '
+                'продолжится теми, что открылись.'),
+             tr('Больше нагрузка на сервер и сеть; некоторые серверы при множестве подключений '
+                'на время блокируют вход. Для начала разумно 3–4.')],
+            extra=self.sp_conns))
+        lay.addWidget(g)
+
+        g = QGroupBox(tr('Повторы писем (одно письмо в нескольких папках)'))
+        v = QVBoxLayout(g)
+        self.rb_dup_auto = QRadioButton(tr('Автоматически (рекомендуется)'))
+        self.rb_dup_always = QRadioButton(tr('Всегда искать повторы'))
+        self.rb_dup_never = QRadioButton(tr('Не искать, качать всё как есть'))
+        bg = QButtonGroup(self)
+        for rb in (self.rb_dup_auto, self.rb_dup_always, self.rb_dup_never):
+            bg.addButton(rb)
+        v.addLayout(self._option(
+            self.rb_dup_auto,
+            tr('Повторы ищутся только в ящиках с папкой «Вся почта» (Gmail): там каждое письмо '
+               'лежит ещё и во «Вся почта».'),
+            [tr('В Gmail письмо скачивается один раз и остаётся в папке по ярлыку — архив не '
+                'раздувается вдвое.'),
+             tr('На остальных серверах подготовка быстрая: Message-ID писем не запрашиваются.')],
+            [tr('Копии, которые вы сами разложили по папкам на обычном сервере, скачаются как есть.')]))
+        v.addLayout(self._option(
+            self.rb_dup_always,
+            tr('Перед загрузкой у сервера запрашиваются Message-ID и размеры всех новых писем.'),
+            [tr('Копия одного письма не скачивается второй раз ни на каком сервере.')],
+            [tr('Подготовка дольше: на mail.ru и Exchange на десятках тысяч писем это заметно.')]))
+        v.addLayout(self._option(
+            self.rb_dup_never, "",
+            [tr('Самая быстрая подготовка; архив точно повторяет папки сервера.')],
+            [tr('В Gmail большинство писем скачается дважды: в своей папке и во «Вся почта».')]))
+        lay.addWidget(g)
+        lay.addStretch(1)
+        # описания длинные: на маленьком экране страница прокручивается, а не обрезается
+        self.method_scroll = QScrollArea(widgetResizable=True, frameShape=QFrame.Shape.NoFrame)
+        self.method_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.method_scroll.setWidget(page)
+        return self.method_scroll
+
+    def _fit_method_page(self):
+        """Подогнать высоту окна под страницу вариантов (переносимый текст сам её не задаёт)."""
+        page = self.method_scroll.widget()
+        need = page.layout().totalHeightForWidth(self.method_scroll.viewport().width())
+        extra = need - self.method_scroll.viewport().height()
+        if extra > 0:
+            screen = self.screen().availableGeometry().height() if self.screen() else 900
+            self.resize(self.width(), min(self.height() + extra, screen - 60))
+
+    def _show_page(self, i: int):
+        self.pages.setCurrentIndex(i)
+        first = i == 0
+        self.btn_test.setVisible(first)
+        self.btn_next.setVisible(first)
+        self.btn_back.setVisible(not first)
+        self.btn_save.setVisible(not first)
+        (self.btn_next if first else self.btn_save).setDefault(True)
+        if not first:
+            self._fit_method_page()
+
+    def _next(self):
+        err = self._check_page1(self._collect())
+        if err:
+            QMessageBox.warning(self, tr('Проверьте данные'), err)
+            return
+        self._show_page(1)
 
     def _load(self, a: Account):
         self.ed_email.setText(a.email)
@@ -185,8 +308,13 @@ class AccountDialog(QDialog):
         if a.folder_raw:
             self.cb_folder.addItem(a.folder_display or a.folder_raw, a.folder_raw)
         (self.rb_one_folder if a.folder_mode == "one" else self.rb_all_folders).setChecked(True)
-        self.chk_dups.setChecked(a.skip_duplicates)
-        self.sp_conns.setValue(min(max(int(a.connections or 1), 1), MAX_CONNECTIONS))
+        conns = min(max(int(a.connections or 1), 1), MAX_CONNECTIONS)
+        (self.rb_many_conn if conns > 1 else self.rb_one_conn).setChecked(True)
+        if conns > 1:
+            self.sp_conns.setValue(conns)
+        self.sp_conns.setEnabled(conns > 1)
+        {"always": self.rb_dup_always, "never": self.rb_dup_never}.get(
+            a.duplicates, self.rb_dup_auto).setChecked(True)
         self.ed_arch.setText(a.archive_dir)
         (self.rb_arch_own if a.archive_dir else self.rb_arch_default).setChecked(True)
         self._sync_enabled()
@@ -256,8 +384,9 @@ class AccountDialog(QDialog):
         a.date_to = self.de_to.date().toString("yyyy-MM-dd")
         a.folder_mode = "one" if self.rb_one_folder.isChecked() else "all"
         a.folder_raw = self.cb_folder.currentData() or ""
-        a.skip_duplicates = self.chk_dups.isChecked()
-        a.connections = self.sp_conns.value()
+        a.connections = self.sp_conns.value() if self.rb_many_conn.isChecked() else 1
+        a.duplicates = ("always" if self.rb_dup_always.isChecked() else
+                        "never" if self.rb_dup_never.isChecked() else "auto")
         a.folder_display = self.cb_folder.currentText()
         a.archive_dir = self.ed_arch.text().strip() if self.rb_arch_own.isChecked() else ""
         return a
@@ -301,11 +430,7 @@ class AccountDialog(QDialog):
             return self._result(False, err)
 
         def job():
-            c = ImapConnection(a)
-            c.connect()
-            n = len(c.list_folders())
-            c.logout()
-            return n
+            return len(server_folders(a))
         self._busy(True, tr('Подключение…'))
         run_bg(job, lambda n: self._result(True, tr('Подключение успешно. Папок на сервере: {n}.').format(n=n)),
                lambda e: self._result(False, e))
@@ -317,11 +442,7 @@ class AccountDialog(QDialog):
             return self._result(False, err)
 
         def job():
-            c = ImapConnection(a)
-            c.connect()
-            folders = c.list_folders()
-            c.logout()
-            return folders
+            return server_folders(a)
 
         def done(folders):
             current = self.cb_folder.currentData()
@@ -337,12 +458,17 @@ class AccountDialog(QDialog):
         self._busy(True, tr('Получение списка папок…'))
         run_bg(job, done, lambda e: self._result(False, e))
 
-    def _accept(self):
-        a = self._collect()
+    def _check_page1(self, a: Account) -> str | None:
         err = self._validate(a)
         if not err and a.folder_mode == "one" and not a.folder_raw:
             err = tr('Выберите папку (нажмите «Загрузить список папок»).')
+        return err
+
+    def _accept(self):
+        a = self._collect()
+        err = self._check_page1(a)
         if err:
+            self._show_page(0)
             QMessageBox.warning(self, tr('Проверьте данные'), err)
             return
         self.account = a

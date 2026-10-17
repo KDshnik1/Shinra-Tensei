@@ -7,6 +7,45 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.15.0] — 2026-10-17
+
+### Added
+- **Mail download rewritten in Rust.** Connecting to the server (SSL/TLS, STARTTLS, unencrypted),
+  signing in, listing folders, preparation, the batch queue, connections, reconnects, duplicate
+  detection and writing messages to the archive are now done by the Rust core. The app's windows
+  stay in Python. The archive format is unchanged, so existing archives resume as before.
+  - Stop takes effect at once: the core closes the connections instead of waiting for the server
+    to answer. In a test with a server that replies every 8 seconds, stopping took 0.1 s instead of
+    39 s.
+  - Messages in a batch are saved as they arrive, not after the whole batch. When a connection
+    drops, only the messages that did not arrive are requested again.
+  - The mailbox window uses the core too: "Check connection" and "Load folder list".
+  - If the core cannot agree on encryption with the server (old servers that only know TLS 1.0/1.1),
+    the download switches to the Python module by itself and says so in the log. Without the core,
+    or with `SHINRA_PURE_PYTHON=1`, everything runs on Python as before.
+- **Two-step mailbox window.** "Save" is replaced by "Next", which opens a "How to download mail"
+  page. It has two choices, and each option says what it does, with its pros and cons:
+  - server connections: one or several (2–10);
+  - duplicates: "Automatic (recommended)", "Always look for duplicates" or "Don't look, download
+    everything as is".
+- Connection tests: SSL/TLS and STARTTLS with a self-signed certificate, rejecting an untrusted
+  certificate, signing in with a quote in the login and a non-ASCII password, falling back to the
+  Python module. Tests for the mailbox window.
+
+### Changed
+- **Preparation is shorter and no longer holds up the download.** The app used to ask the server
+  for the sizes and Message-IDs of all new messages in all folders before downloading anything, so
+  large mailboxes sat at "Preparing: INBOX" with 0 messages for a long time. Now a folder is
+  prepared in parts of 1,000 messages, and each part's batches start downloading straight away. The
+  status shows progress: "Preparing: INBOX (3,000 of 20,978)".
+- **Duplicates are only looked for where they occur.** In "Automatic" mode Message-IDs are requested
+  only for mailboxes with an "All Mail" folder (Gmail). On mail.ru, Yandex, Exchange and other
+  servers a message lives in one folder, and preparation only asks for sizes. Mailboxes that had
+  duplicate skipping turned off get "Don't look".
+
+### Fixed
+- A login containing a space or a quote failed: the Python module sent it unquoted.
+
 ## [0.14.0] — 2026-10-17
 
 ### Added
