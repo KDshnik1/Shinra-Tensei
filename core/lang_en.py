@@ -251,10 +251,6 @@ EN = {
         'All',
     'Отметить все ящики / снять все отметки':
         'Check all mailboxes / clear all checks',
-    ' Одновременно ящиков: ':
-        ' Mailboxes at once: ',
-    'Тема: ':
-        'Theme: ',
     'Папка архива…':
         'Archive folder…',
     'Открыть архив':
@@ -829,4 +825,16 @@ EN = {
         "Don't let Windows sleep during download and export",
     'Пока идёт загрузка или экспорт, компьютер не уснёт от бездействия. Монитор гаснуть может. Закрытие крышки ноутбука и «Спящий режим» из меню «Пуск» по-прежнему усыпляют компьютер.':
         'While a download or export runs, the computer will not go to sleep when idle. The screen may still turn off. Closing a laptop lid or choosing Sleep in the Start menu still puts it to sleep.',
+    'Тема оформления':
+        'Theme',
+    'Одновременно ящиков:':
+        'Mailboxes at once:',
+    'Сколько ящиков выкачивать одновременно':
+        'How many mailboxes to download at the same time',
+    'Ширина колонок по умолчанию':
+        'Default column widths',
+    'Настройки':
+        'Settings',
+    'Тема, язык, число одновременно выкачиваемых ящиков':
+        'Theme, language, number of mailboxes downloaded at once',
 }

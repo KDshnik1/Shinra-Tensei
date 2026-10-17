@@ -52,6 +52,8 @@ QToolBar { background: $surface; border: none; border-bottom: 1px solid $border;
 QToolButton { padding: 5px 9px; border-radius: 4px; color: $text; background: transparent; }
 QToolButton:hover { background: $hover; }
 QToolButton:disabled { color: $disabled; }
+/* кнопка «»» с кнопками, которые не поместились: общий padding сжимал её значок в ноль */
+QToolButton#qt_toolbar_ext_button { padding: 0px; min-width: 16px; }
 
 QGroupBox { border: 1px solid $border; border-radius: 6px; margin-top: 14px;
             background: $surface; padding: 10px 8px 8px 8px; }
