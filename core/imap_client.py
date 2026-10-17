@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from . import imap_utf7
+from .mailparse import msgid_key
 from .i18n import tr
 
 # Некоторые серверы присылают очень длинные строки — снимаем ограничение imaplib.
@@ -180,6 +181,7 @@ def _uid_chunks(uids, limit=4000):
 
 _RESP_START = re.compile(rb"\s*\d+\s+\(")
 _UID = re.compile(rb"\bUID\s+(\d+)", re.IGNORECASE)
+_MSGID = re.compile(rb"(?im)^message-id:[ \t]*(.*(?:\r?\n[ \t].*)*)")
 
 
 def _split_fetch(data):
@@ -259,7 +261,10 @@ class ImapConnection:
             try:
                 self.M.logout()
             except Exception:
-                pass
+                try:                    # оборванное соединение: imaplib сам сокет не закроет
+                    self.M.shutdown()
+                except Exception:
+                    pass
             self.M = None
 
     # ---------- операции ----------
@@ -314,6 +319,24 @@ class ImapConnection:
                 z = re.search(rb"RFC822\.SIZE\s+(\d+)", meta, re.IGNORECASE)
                 if u and z:
                     out[u.group(1).decode()] = int(z.group(1))
+        return out
+
+    def fetch_meta(self, uids) -> dict:
+        """{uid: (размер, Message-ID)} — для пачек и поиска повторов, без тел писем."""
+        out = {}
+        for chunk in _uid_chunks(uids):
+            typ, data = self.M.uid("FETCH", chunk,
+                                   "(UID RFC822.SIZE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+            if typ != "OK":
+                raise ImapError(tr('Сервер отказал в выдаче письма: {data}').format(data=data))
+            for meta, head in _split_fetch(data):
+                u = _UID.search(meta)
+                z = re.search(rb"RFC822\.SIZE\s+(\d+)", meta, re.IGNORECASE)
+                if not (u and z):
+                    continue
+                m = _MSGID.search(head or b"")
+                msgid = msgid_key(m.group(1).decode("latin-1")) if m else ""
+                out[u.group(1).decode()] = (int(z.group(1)), msgid)
         return out
 
     def fetch_many(self, uids) -> dict:

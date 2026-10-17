@@ -1,0 +1,10 @@
+From Mon Jan  1 00:00:00 2024
+From: weird@@example..com
+To: a@b.com <c@d.com>, (unbalanced
+Subject: =?utf-8?B?invalid***?=
+Date: garbage date
+Message-ID:   <id@x>  
+Content-Type: multipart/mixed
+
+no boundary at all
+second line

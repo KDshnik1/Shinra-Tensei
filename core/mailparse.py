@@ -381,6 +381,11 @@ def parse_full(path: Path) -> Body:
     return body
 
 
+def msgid_key(value) -> str:
+    """Message-ID для поиска повторов: без пробелов и переносов строк."""
+    return "".join(str(value or "").split())
+
+
 def html_to_text(h: str) -> str:
     h = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", h)
     h = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", h)

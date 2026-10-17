@@ -1,0 +1,51 @@
+From: a@b.c
+Subject: Re: =?utf-8?Q?=D0=9F=D1=80=D0=B8=D0=B2=D0=B5=D1=82?=
+Date: Thu, 4 Apr 2019 04:04:04
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=outer
+
+--outer
+Content-Type: multipart/alternative; boundary="alt"
+
+--alt
+Content-Type: text/plain; charset=utf-8
+
+Plain РІРµСЂСЃРёСЏ
+
+--alt
+Content-Type: multipart/related; boundary=rel
+
+--rel
+Content-Type: text/html; charset=utf-8
+
+<p>HTML <img src=cid:pic1></p>
+--rel
+Content-Type: image/jpeg
+Content-ID: <pic1>
+Content-Disposition: inline
+Content-Transfer-Encoding: base64
+
+/9j/4AAQ
+--rel--
+
+--alt--
+--outer
+Content-Type: message/rfc822
+
+From: x@y.z
+Subject: =?utf-8?B?0J/QtdGA0LXRgdC70LDQvdC90L7QtTog0L7RgtGH0ZHRgg==?=
+
+inner body
+
+--outer
+Content-Type: message/rfc822
+
+From: x@y.z
+
+no subject inner
+--outer
+Content-Type: text/plain; charset=x-unknown-charset
+Content-Disposition: attachment
+
+неизвестная кодировка
+--outer--

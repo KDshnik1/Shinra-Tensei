@@ -19,7 +19,7 @@ from pathlib import Path
 from . import mailparse, msgfile, pst_writer
 from .pst_reader import verify
 from .pst_writer import NATIVE, NID_IPM_SUBTREE, PstFile, filetime
-from .storage import load_flags, safe_name
+from .storage import is_all_mail, load_flags, safe_name
 from .i18n import DATE_FMT, DATETIME_FMT, dec, num, tr
 
 GB = 1024 ** 3
@@ -185,7 +185,7 @@ def _aligned(rows, indent=""):
 
 
 def write_report(report_path: Path, display_name: str, parts: list, split_bytes: int,
-                 password: bool, errors: int, stopped: bool) -> Path:
+                 password: bool, errors: int, stopped: bool, duplicates: int = 0) -> Path:
     total = sum(p.count for p in parts)
     lo = min((p.lo for p in parts if p.lo), default=None)
     hi = max((p.hi for p in parts if p.hi), default=None)
@@ -198,6 +198,8 @@ def write_report(report_path: Path, display_name: str, parts: list, split_bytes:
             (tr('Период писем'), _period(lo, hi)),
             (tr('Файлов PST'), tr('{0} (размер одной части — до {gb} ГБ)').format(len(parts), gb=gb)),
             (tr('Пароль на PST'), pw_text)]
+    if duplicates:
+        rows.append((tr('Повторов не записано'), tr('{0} (те же письма есть в других папках)').format(_fmt_n(duplicates))))
     if errors:
         rows.append((tr('Ошибок'), tr('{errors} (подробности — в журнале экспорта)').format(errors=errors)))
     out = [title, "=" * max(60, len(title))] + _aligned(rows)
@@ -257,18 +259,59 @@ def _parse_ahead(pool, emls, flags, stop_event):
             f.cancel()
 
 
+def _norm_path(p) -> str:
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def drop_duplicates(tasks, stop=None):
+    """Убирает из задач экспорта повторы писем — с тем же Message-ID и размером. Остаётся
+    первая копия; «Вся почта» Gmail идёт последней, поэтому письма остаются в папках по
+    ярлыкам. Возвращает (задачи, сколько повторов убрано)."""
+    from .mail_index import load_folders
+    tasks = sorted(tasks, key=lambda t: is_all_mail(t[0]))      # sorted устойчив
+    rows = load_folders([(t[1], t[0].get("display", "")) for t in tasks], stop=stop)
+    keys = {}
+    for r in rows:
+        k = mailparse.msgid_key(r.get("msgid"))
+        if k:
+            keys[_norm_path(r["path"])] = (k, r.get("size"))
+    seen, out, dups = set(), [], 0
+    for info, fdir, emls in tasks:
+        kept = []
+        for e in emls:
+            k = keys.get(_norm_path(e))
+            if k is not None and k in seen:
+                dups += 1
+                continue
+            if k is not None:
+                seen.add(k)
+            kept.append(e)
+        out.append((info, fdir, kept))
+    return out, dups
+
+
 def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
-                   cb, stop_event, password: str = "", split_gb: float = DEFAULT_SPLIT_GB):
+                   cb, stop_event, password: str = "", split_gb: float = DEFAULT_SPLIT_GB,
+                   skip_duplicates: bool = False):
     """cb: log(str), progress(done, total), stage(str) — необязательно.
+    skip_duplicates — не записывать повторы писем (см. drop_duplicates).
     Возвращает (успешно, ошибок, [файлы PST], путь к отчёту)."""
     err = check_password(password)
     if err:
         raise PstExportError(err)
     split_bytes = int(min(max(float(split_gb), MIN_SPLIT_GB), MAX_SPLIT_GB) * GB)
     tasks = collect_tasks(mailbox_dir)
-    total = sum(len(t[2]) for t in tasks)
     if not tasks:
         raise PstExportError(tr('В архиве нет писем для этого ящика — сначала выполните загрузку'))
+    dups = 0
+    if skip_duplicates:
+        stage_ = getattr(cb, "stage", None)
+        if stage_:
+            stage_(tr('Поиск повторов писем…'))
+        tasks, dups = drop_duplicates(tasks, stop=stop_event.is_set)
+        if dups:
+            cb.log(tr('Повторы писем (есть в другой папке) не экспортируются: {0}').format(_fmt_n(dups)))
+    total = sum(len(t[2]) for t in tasks)
     pst_path.parent.mkdir(parents=True, exist_ok=True)
 
     stage = getattr(cb, "stage", None) or (lambda _t: None)
@@ -384,7 +427,7 @@ def export_mailbox(mailbox_dir: Path, pst_path: Path, display_name: str,
             cb.log(tr('ВНИМАНИЕ: самопроверка файла {0} не пройдена: {e}').format(path.name, e=e))
 
     report = write_report(pst_path.with_name(tr('{0}_отчёт.txt').format(pst_path.stem)), display_name,
-                          parts, split_bytes, bool(password), errors, stop_event.is_set())
+                          parts, split_bytes, bool(password), errors, stop_event.is_set(), dups)
     for i, p in enumerate(parts, 1):
         cb.log(tr('Часть {i}: {0} — {1}, {2} писем, {3}').format(p.path.name, _fmt_size(p.size), _fmt_n(p.count), _period(p.lo, p.hi), i=i))
     cb.log(tr('Отчёт: {report}').format(report=report))

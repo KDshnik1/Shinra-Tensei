@@ -8,7 +8,7 @@ from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QSortFilter
                             QTimer, QUrl)
 from PySide6.QtGui import QImage, QTextDocument
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit,
-                               QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+                               QDialog, QDoubleSpinBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSplitter,
                                QTableView, QTextBrowser, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
@@ -62,9 +62,19 @@ def prepare_rows(rows):
         r["_sent_local"] = sdt.astimezone() if sdt else None
         r["_sent_ts"] = sdt.timestamp() if sdt else None
         r["_recv_local"] = datetime.fromtimestamp(r["received"]) if r.get("received") else None
-        r["_search"] = " ".join((r.get("from", ""), r.get("to", ""), r.get("cc", ""),
-                                 r.get("subject", ""))).lower()
+        s = {"from": r.get("from", "").lower(),
+             "to": " ".join((r.get("to", ""), r.get("cc", ""))).lower(),
+             "subject": r.get("subject", "").lower(),
+             "attach": "\n".join(r.get("att_names") or []).lower()}
+        r["_s"] = s
+        r["_search"] = "\n".join(s.values())
     return rows
+
+
+# Где искать: (значение, название в списке)
+SCOPES = [("all", tr('Везде')), ("from", tr('Отправитель')), ("to", tr('Получатели')),
+          ("subject", tr('Тема')), ("attach", tr('Имена вложений'))]
+MB = 1024 * 1024
 
 
 class MessageModel(QAbstractTableModel):
@@ -154,21 +164,33 @@ class MessageFilter(QSortFilterProxyModel):
         self.hits = None           # пути писем, где запрос найден в тексте (или None)
         self.dfrom = self.dto = None
         self.by = "received"
+        self.scope = "all"         # all | from | to | subject | attach
+        self.with_att = False      # только письма с вложениями
+        self.min_size = 0          # байт; 0 — любой размер
 
     def sort(self, column, order=Qt.SortOrder.AscendingOrder):
         # сортирует исходная модель; прокси только фильтрует и сохраняет её порядок
         self.sourceModel().sort(column, order)
 
-    def update(self, text, dfrom, dto, by, hits=None):
+    def update(self, text, dfrom, dto, by, hits=None, scope="all", with_att=False, min_size=0):
         self.text, self.dfrom, self.dto, self.by = text.lower().strip(), dfrom, dto, by
         self.hits = hits
+        self.scope, self.with_att, self.min_size = scope, with_att, min_size
         self.invalidateFilter()
 
     def filterAcceptsRow(self, src_row, parent):
         r = self.sourceModel().rows[src_row]
-        if self.text and self.text not in r["_search"] and not (
-                self.hits is not None and r["path"] in self.hits):
+        if self.with_att and not r.get("attach"):
             return False
+        if self.min_size and (r.get("size") or 0) < self.min_size:
+            return False
+        if self.text:
+            if self.scope == "all":
+                if self.text not in r["_search"] and not (
+                        self.hits is not None and r["path"] in self.hits):
+                    return False
+            elif self.text not in r["_s"].get(self.scope, ""):
+                return False
         if self.dfrom or self.dto:
             dt = r["_recv_local"] if self.by == "received" else r["_sent_local"]
             if dt is None:
@@ -241,18 +263,31 @@ class ViewerWindow(QDialog):
         tl = QVBoxLayout(top)
         tl.setContentsMargins(0, 0, 0, 0)
         fl = QHBoxLayout()
-        self.ed_search = QLineEdit(placeholderText=tr('Поиск: отправитель, получатель, тема…'))
+        self.ed_search = QLineEdit(placeholderText=tr('Поиск: отправитель, получатель, тема, вложения…'))
         self.ed_search.setClearButtonEnabled(True)
         # фильтр — после паузы в наборе, а не на каждую букву
         self._filter_timer = QTimer(self, singleShot=True, interval=200)
         self._filter_timer.timeout.connect(self._apply_filter)
         self.ed_search.textChanged.connect(self._filter_timer.start)
         fl.addWidget(self.ed_search, 2)
+        self.cb_scope = QComboBox()
+        self.cb_scope.setToolTip(tr('Где искать'))
+        for val, text in SCOPES:
+            self.cb_scope.addItem(text, val)
+        fl.addWidget(self.cb_scope)
         self.chk_body = QCheckBox(tr('в тексте писем'))
         self.chk_body.setToolTip(tr('Искать и в тексте писем. В первый раз папка индексируется, '
                                     'потом поиск быстрый'))
         self.chk_body.toggled.connect(self._body_toggled)
         fl.addWidget(self.chk_body)
+        self.btn_reset = QPushButton(tr('Сбросить фильтры'))
+        self.btn_reset.clicked.connect(self._reset_filters)
+        fl.addWidget(self.btn_reset)
+        self.lbl_count = QLabel()
+        fl.addWidget(self.lbl_count)
+        tl.addLayout(fl)
+
+        fl = QHBoxLayout()
         self.chk_date = QCheckBox(tr('Дата'))
         self.chk_date.toggled.connect(self._apply_filter)
         self.cb_by = QComboBox()
@@ -271,9 +306,21 @@ class ViewerWindow(QDialog):
         fl.addWidget(self.de_from)
         fl.addWidget(QLabel(tr('по')))
         fl.addWidget(self.de_to)
-        self.lbl_count = QLabel()
-        fl.addWidget(self.lbl_count)
+        fl.addSpacing(12)
+        self.chk_att = QCheckBox(tr('Только с вложениями'))
+        self.chk_att.toggled.connect(self._apply_filter)
+        fl.addWidget(self.chk_att)
+        fl.addSpacing(12)
+        fl.addWidget(QLabel(tr('Размер от')))
+        self.sp_size = QDoubleSpinBox(decimals=1, minimum=0, maximum=100000, singleStep=1,
+                                      suffix=tr(' МБ'))
+        self.sp_size.setSpecialValueText(tr('любой'))
+        self.sp_size.setToolTip(tr('Показывать только письма не меньше этого размера'))
+        self.sp_size.valueChanged.connect(self._filter_timer.start)
+        fl.addWidget(self.sp_size)
+        fl.addStretch(1)
         tl.addLayout(fl)
+        self.cb_scope.currentIndexChanged.connect(self._apply_filter)
 
         self.model = MessageModel()
         self.proxy = MessageFilter()
@@ -428,13 +475,29 @@ class ViewerWindow(QDialog):
         dfrom = self.de_from.date().toPython() if on else None
         dto = self.de_to.date().toPython() if on else None
         text = self.ed_search.text()
+        scope = self.cb_scope.currentData()
+        self.chk_body.setEnabled(scope == "all")       # текст писем — только при поиске везде
         hits = None
-        if (text.strip() and self.chk_body.isChecked()
+        if (text.strip() and scope == "all" and self.chk_body.isChecked()
                 and self._texts_token == self._load_token and self._texts is not None):
             hits = self._texts.search(text)
-        self.proxy.update(text, dfrom, dto, self.cb_by.currentData(), hits)
+        self.proxy.update(text, dfrom, dto, self.cb_by.currentData(), hits, scope,
+                          self.chk_att.isChecked(), int(self.sp_size.value() * MB))
         if self._texts_progress is None:
             self._update_count()
+
+    def _reset_filters(self):
+        widgets = (self.ed_search, self.cb_scope, self.chk_date, self.chk_att, self.sp_size)
+        for w in widgets:
+            w.blockSignals(True)
+        self.ed_search.clear()
+        self.cb_scope.setCurrentIndex(0)
+        self.chk_date.setChecked(False)
+        self.chk_att.setChecked(False)
+        self.sp_size.setValue(0)
+        for w in widgets:
+            w.blockSignals(False)
+        self._apply_filter()
 
     # ---------- поиск по тексту писем ----------
     def _body_toggled(self, on):

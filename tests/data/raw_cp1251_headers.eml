@@ -1,0 +1,7 @@
+From: Иван Петров <ivan@example.ru>
+To: Мария <maria@example.ru>, boss@example.ru
+Subject: Отчёт за квартал
+Date: Mon, 1 Jan 2024 10:00:00 +0300
+Content-Type: text/plain
+Текст без charset в cp1251.
+Вторая строка.

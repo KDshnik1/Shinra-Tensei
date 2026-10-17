@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDateEdit, QD
                                QLabel, QLineEdit, QMessageBox, QPushButton, QRadioButton,
                                QSpinBox, QVBoxLayout)
 
+from core.downloader import MAX_CONNECTIONS
 from core.imap_client import ImapConnection
 from core.models import SECURITY_OPTIONS, Account
 from core.storage import safe_name
@@ -63,6 +64,17 @@ class AccountDialog(QDialog):
         f.addRow(tr('Логин:'), self.ed_login)
         f.addRow(tr('Пароль:'), hpw)
         f.addRow("", self.chk_save)
+        self.sp_conns = QSpinBox(minimum=1, maximum=MAX_CONNECTIONS, value=1)
+        self.sp_conns.setToolTip(tr(
+            'Сколько соединений с сервером открывать при загрузке этого ящика. Несколько соединений '
+            'качают письма одновременно — это быстрее, если сервер ограничивает скорость одного '
+            'соединения. Многие серверы не дают открыть больше 5–15 соединений на ящик (Gmail — 15), '
+            'а соединения всех запущенных ящиков складываются. Если сервер откажет, загрузка '
+            'продолжится теми соединениями, что открылись.'))
+        hc = QHBoxLayout()
+        hc.addWidget(self.sp_conns)
+        hc.addWidget(QLabel(tr('1 — обычная загрузка; больше — быстрее на медленных серверах')), 1)
+        f.addRow(tr('Соединений:'), hc)
         lay.addWidget(g)
 
         g = QGroupBox(tr('Период'))
@@ -103,6 +115,10 @@ class AccountDialog(QDialog):
         h.addWidget(self.btn_folders)
         v.addWidget(self.rb_all_folders)
         v.addLayout(h)
+        self.chk_dups = QCheckBox(tr('Не загружать повторы писем из других папок (например, «Вся почта» в Gmail)'))
+        self.chk_dups.setToolTip(tr('Письмо с тем же Message-ID и размером, что уже есть в архиве '
+                                    'ящика, второй раз не скачивается'))
+        v.addWidget(self.chk_dups)
         self.rb_one_folder.toggled.connect(self._sync_enabled)
         lay.addWidget(g)
 
@@ -169,6 +185,8 @@ class AccountDialog(QDialog):
         if a.folder_raw:
             self.cb_folder.addItem(a.folder_display or a.folder_raw, a.folder_raw)
         (self.rb_one_folder if a.folder_mode == "one" else self.rb_all_folders).setChecked(True)
+        self.chk_dups.setChecked(a.skip_duplicates)
+        self.sp_conns.setValue(min(max(int(a.connections or 1), 1), MAX_CONNECTIONS))
         self.ed_arch.setText(a.archive_dir)
         (self.rb_arch_own if a.archive_dir else self.rb_arch_default).setChecked(True)
         self._sync_enabled()
@@ -238,6 +256,8 @@ class AccountDialog(QDialog):
         a.date_to = self.de_to.date().toString("yyyy-MM-dd")
         a.folder_mode = "one" if self.rb_one_folder.isChecked() else "all"
         a.folder_raw = self.cb_folder.currentData() or ""
+        a.skip_duplicates = self.chk_dups.isChecked()
+        a.connections = self.sp_conns.value()
         a.folder_display = self.cb_folder.currentText()
         a.archive_dir = self.ed_arch.text().strip() if self.rb_arch_own.isChecked() else ""
         return a

@@ -113,6 +113,9 @@ class ExportDialog(QDialog):
         self.lbl_info.setWordWrap(True)
         v.addWidget(self.lbl_info)
         self._split_changed(self.sp_split.value())
+        self.chk_dups = QCheckBox(tr('Не записывать повторы писем (то же письмо в нескольких папках, например «Вся почта» в Gmail)'))
+        self.chk_dups.setChecked(self.cfg.export_skip_duplicates)
+        v.addWidget(self.chk_dups)
         lay.addWidget(g)
 
         g = QGroupBox(tr('Защита паролем'))
@@ -243,6 +246,7 @@ class ExportDialog(QDialog):
         out = Path(self.ed_out.text().strip())
         self.cfg.pst_dir = str(out)
         self.cfg.split_gb = self.sp_split.value()
+        self.cfg.export_skip_duplicates = self.chk_dups.isChecked()
         try:
             self.cfg.save()
         except Exception:
@@ -251,17 +255,19 @@ class ExportDialog(QDialog):
         self._last_reports = []
         self.btn_report.setEnabled(False)
         self.sp_split.setEnabled(False)
+        self.chk_dups.setEnabled(False)
         self.stop.clear()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         set_progress(self.pb, 0, 0, tr('Экспортировано писем: '))
         set_progress(self.pb_total, 0, 0, tr('Всего: '))
         self.thread = threading.Thread(target=self._worker,
-                                       args=(emails, out, password, self.sp_split.value()),
+                                       args=(emails, out, password, self.sp_split.value(),
+                                             self.chk_dups.isChecked()),
                                        daemon=True)
         self.thread.start()
 
-    def _worker(self, emails, out: Path, password, split_gb):
+    def _worker(self, emails, out: Path, password, split_gb, skip_dups):
         b = self.bridge
         b.current.emit(tr('Подсчёт писем…'))
         counts = {}
@@ -306,7 +312,7 @@ class ExportDialog(QDialog):
             CB.log(tr('=== Экспорт в {pst}').format(pst=pst))
             try:
                 ok, err, files, report = export_mailbox(mdir, pst, email, CB, self.stop,
-                                                        password, split_gb)
+                                                        password, split_gb, skip_dups)
                 CB.log(tr('Готово: записано писем {0}, ошибок {err}, файлов PST: {1}').format(fmt_num(ok), len(files), err=err))
                 results.append((email, ok, err, report))
             except Exception as e:
@@ -321,6 +327,7 @@ class ExportDialog(QDialog):
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.sp_split.setEnabled(True)
+        self.chk_dups.setEnabled(True)
         self._last_reports = [r[3] for r in results if r[3]]
         self.btn_report.setEnabled(bool(self._last_reports))
         if self._close_after:

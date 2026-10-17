@@ -1,10 +1,15 @@
 name: Build Shinra Tensei.exe
 on:
-  push:
+  push:            # every branch push builds the exe; a tag v* also publishes a GitHub Release
   workflow_dispatch:
+permissions:
+  contents: write  # needed only to create the release on a tag
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,8 +20,22 @@ jobs:
       - run: rustc --version
       - run: pip install ./native
       - run: python -c "import core.pst_writer as w; assert w.NATIVE, 'native core not loaded'"
+      - name: Tests (native core)
+        run: python -m unittest discover -s tests -t . -v
+      - name: Tests (pure Python)
+        run: python -m unittest discover -s tests -t . -v
+        env:
+          SHINRA_PURE_PYTHON: "1"
       - run: pyinstaller --noconfirm --clean --onefile --windowed --name "Shinra Tensei" --hidden-import win32timezone --hidden-import shinra_core app.py
       - uses: actions/upload-artifact@v4
         with:
           name: Shinra-Tensei
           path: "dist/Shinra Tensei.exe"
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          python .github/release_notes.py "$env:TAG" notes.md
+          gh release create "$env:TAG" "dist/Shinra Tensei.exe#Shinra Tensei.exe" --title "Shinra Tensei $env:TAG" --notes-file notes.md --verify-tag
