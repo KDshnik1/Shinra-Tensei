@@ -7,6 +7,21 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.11.0] — 2026-10-17
+
+### Changed
+- **The message viewer is faster.** On a folder of 21,000 messages:
+  - sorting by a column takes 0.15 s instead of 9–17 s: rows are sorted in the model itself instead
+    of through `QSortFilterProxyModel`, which called Python code on every comparison;
+  - the first time a folder is opened (building the index) takes 3 s instead of 46 s: the native core
+    parses the headers on several threads;
+  - opening it again takes 1.5 s instead of 18 s, and the window no longer freezes: rows are no
+    longer sorted through the proxy model, files are listed together with their sizes in one pass,
+    and table dates are prepared on a background thread;
+  - search runs 0.2 s after the last typed letter instead of on every letter.
+- Without the native core the viewer uses the Python code as before (sorting and search are faster
+  there too).
+
 ## [0.10.1] — 2026-10-16
 
 ### Fixed

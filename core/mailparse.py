@@ -3,6 +3,7 @@
 import codecs
 import email.message
 import email.utils
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -226,8 +227,26 @@ def received_from_bytes(data: bytes):
     return header_received(msg)
 
 
+# Нативное ядро (Rust): summarize() в разы быстрее и без GIL — индекс просмотрщика
+# строится в несколько потоков. Без модуля или с SHINRA_PURE_PYTHON=1 — Python-код.
+NATIVE = False
+if not os.environ.get("SHINRA_PURE_PYTHON"):
+    try:
+        import shinra_core as _native
+        _native.set_translator(tr)
+        NATIVE = hasattr(_native, "summarize")
+    except ImportError:
+        pass
+
+
 def summarize(path: Path, st=None) -> dict:
     """Краткие сведения о письме (только заголовки — быстро)."""
+    if NATIVE:
+        return _native.summarize(path)
+    return _py_summarize(path, st)
+
+
+def _py_summarize(path: Path, st=None) -> dict:
     st = st or path.stat()
     head = _read_head(path)
     msg = BytesParser(policy=policy.compat32).parsebytes(head, headersonly=True)

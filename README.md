@@ -72,6 +72,9 @@ PST and runs the self-check about 6× faster than the Python code, and several e
 once really use several CPU cores. The PST files it writes are byte-for-byte identical to the Python
 writer's.
 
+The message viewer stays in Python (PySide6), but the core also builds its folder index, on several
+threads and about 15× faster.
+
 - GitHub Actions builds it automatically. `build.bat` builds it when [Rust](https://rustup.rs) is
   installed and otherwise skips it.
 - From source: `pip install ./native` (needs Rust).

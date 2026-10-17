@@ -5,7 +5,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from PySide6.QtCore import (QAbstractTableModel, QDate, QModelIndex, QSortFilterProxyModel, Qt,
-                            QUrl)
+                            QTimer, QUrl)
 from PySide6.QtGui import QImage, QTextDocument
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit,
                                QDialog, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
@@ -22,7 +22,6 @@ from core.i18n import DATETIME_FMT, QT_DATE_FMT, tr
 
 COLS = ["", tr('От'), tr('Кому'), tr('Тема'), tr('Отправлено'), tr('Получено'), tr('Размер'), tr('Папка')]
 C_ATT, C_FROM, C_TO, C_SUBJ, C_SENT, C_RECV, C_SIZE, C_FOLDER = range(8)
-SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 
 
 def human_size(n: int) -> str:
@@ -37,21 +36,67 @@ def fmt_dt(dt: datetime | None) -> str:
     return dt.strftime(DATETIME_FMT) if dt else ""
 
 
+def _sort_key(c):
+    if c == C_ATT:
+        return lambda r: int(r.get("attach") or 0)
+    if c == C_SENT:
+        return lambda r: r["_sent_ts"] or 0.0
+    if c == C_RECV:
+        return lambda r: float(r.get("received") or 0)
+    if c == C_SIZE:
+        return lambda r: r.get("size", 0)
+    if c == C_FROM:
+        return lambda r: (r.get("from_name") or r.get("from_addr") or r.get("from", "")).lower()
+    if c == C_TO:
+        return lambda r: r.get("to", "").lower()
+    if c == C_SUBJ:
+        return lambda r: (r.get("subject") or tr('(без темы)')).lower()
+    return lambda r: r.get("folder", "").lower()
+
+
+def prepare_rows(rows):
+    """Готовые для таблицы даты и строка поиска. Вызывается в фоновом потоке вместе
+    с загрузкой папки, чтобы окно не замирало на десятках тысяч писем."""
+    for r in rows:
+        sdt = sent_datetime(r)
+        r["_sent_local"] = sdt.astimezone() if sdt else None
+        r["_sent_ts"] = sdt.timestamp() if sdt else None
+        r["_recv_local"] = datetime.fromtimestamp(r["received"]) if r.get("received") else None
+        r["_search"] = " ".join((r.get("from", ""), r.get("to", ""), r.get("cc", ""),
+                                 r.get("subject", ""))).lower()
+    return rows
+
+
 class MessageModel(QAbstractTableModel):
+    """Сортирует сама (list.sort по готовому ключу): сортировка в QSortFilterProxyModel
+    вызывала data() из Python на каждое сравнение — на 20 000 писем это 10–17 секунд."""
+
     def __init__(self):
         super().__init__()
         self.rows = []
+        self._sort = (C_RECV, Qt.SortOrder.DescendingOrder)
+
+    def _sort_rows(self):
+        col, order = self._sort
+        self.rows.sort(key=_sort_key(col), reverse=order == Qt.SortOrder.DescendingOrder)
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        self._sort = (column, order)
+        self.layoutAboutToBeChanged.emit()
+        old = self.persistentIndexList()
+        old_rows = [self.rows[i.row()] for i in old]
+        self._sort_rows()
+        pos = {id(r): n for n, r in enumerate(self.rows)}
+        self.changePersistentIndexList(
+            old, [self.index(pos[id(r)], i.column()) for r, i in zip(old_rows, old)])
+        self.layoutChanged.emit()
 
     def set_rows(self, rows):
+        if rows and "_search" not in rows[0]:
+            prepare_rows(rows)
         self.beginResetModel()
-        for r in rows:
-            sdt = sent_datetime(r)
-            r["_sent_local"] = sdt.astimezone() if sdt else None
-            r["_sent_ts"] = sdt.timestamp() if sdt else None
-            r["_recv_local"] = datetime.fromtimestamp(r["received"]) if r.get("received") else None
-            r["_search"] = " ".join((r.get("from", ""), r.get("to", ""), r.get("cc", ""),
-                                     r.get("subject", ""))).lower()
         self.rows = rows
+        self._sort_rows()
         self.endResetModel()
 
     def rowCount(self, parent=QModelIndex()):
@@ -88,13 +133,6 @@ class MessageModel(QAbstractTableModel):
                 C_SIZE: human_size(r.get("size", 0)),
                 C_FOLDER: r.get("folder", ""),
             }[c]
-        if role == SORT_ROLE:
-            return {
-                C_ATT: int(r.get("attach") or 0),
-                C_SENT: r["_sent_ts"] or 0.0,
-                C_RECV: float(r.get("received") or 0),
-                C_SIZE: r.get("size", 0),
-            }.get(c, (self.data(index) or "").lower())
         if role == Qt.ItemDataRole.DecorationRole and c == C_ATT and r.get("attach"):
             return icons.paperclip(theme.color("text"))
         if role == Qt.ItemDataRole.ToolTipRole and c == C_ATT and r.get("attach"):
@@ -112,10 +150,13 @@ class MessageModel(QAbstractTableModel):
 class MessageFilter(QSortFilterProxyModel):
     def __init__(self):
         super().__init__()
-        self.setSortRole(SORT_ROLE)
         self.text = ""
         self.dfrom = self.dto = None
         self.by = "received"
+
+    def sort(self, column, order=Qt.SortOrder.AscendingOrder):
+        # сортирует исходная модель; прокси только фильтрует и сохраняет её порядок
+        self.sourceModel().sort(column, order)
 
     def update(self, text, dfrom, dto, by):
         self.text, self.dfrom, self.dto, self.by = text.lower().strip(), dfrom, dto, by
@@ -194,7 +235,10 @@ class ViewerWindow(QDialog):
         fl = QHBoxLayout()
         self.ed_search = QLineEdit(placeholderText=tr('Поиск: отправитель, получатель, тема…'))
         self.ed_search.setClearButtonEnabled(True)
-        self.ed_search.textChanged.connect(self._apply_filter)
+        # фильтр — после паузы в наборе, а не на каждую букву
+        self._filter_timer = QTimer(self, singleShot=True, interval=200)
+        self._filter_timer.timeout.connect(self._apply_filter)
+        self.ed_search.textChanged.connect(self._filter_timer.start)
         fl.addWidget(self.ed_search, 2)
         self.chk_date = QCheckBox(tr('Дата'))
         self.chk_date.toggled.connect(self._apply_filter)
@@ -350,7 +394,7 @@ class ViewerWindow(QDialog):
                     return None
                 rows += load_folder(Path(f["dir"]), f["display"],
                                     stop=lambda: token != self._load_token)
-            return rows
+            return prepare_rows(rows)
 
         def done(rows):
             QApplication.restoreOverrideCursor()

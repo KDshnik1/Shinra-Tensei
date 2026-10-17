@@ -337,6 +337,43 @@ fn eml_to_message<'py>(py: Python<'py>, path: PathBuf, read: bool) -> PyResult<B
     Ok(d)
 }
 
+/// То же, что core.mailparse.summarize(): сведения о письме для просмотрщика (без GIL).
+#[pyfunction]
+fn summarize<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
+    let fwd = tr(py, "Пересланное письмо");
+    let s = py
+        .allow_threads(|| {
+            guard(PARSE_PANIC, || {
+                mail::summarize(&path, &fwd).map_err(PstError::from)
+            })
+        })
+        .map_err(|e| to_pyerr(py, e))?;
+    let d = PyDict::new(py);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    d.set_item("file", name)?;
+    d.set_item("from", s.from)?;
+    d.set_item("from_name", s.from_name)?;
+    d.set_item("from_addr", s.from_addr)?;
+    d.set_item("to", s.to)?;
+    d.set_item("cc", s.cc)?;
+    d.set_item("subject", s.subject)?;
+    d.set_item("msgid", s.msgid)?;
+    d.set_item("sent", s.sent)?;
+    d.set_item("received", s.received)?;
+    d.set_item("size", s.size)?;
+    d.set_item("fsize", s.fsize)?;
+    d.set_item("mtime", s.mtime)?;
+    d.set_item("attach", s.att_names.len())?;
+    d.set_item(
+        "att_names",
+        s.att_names.into_iter().take(10).collect::<Vec<_>>(),
+    )?;
+    Ok(d)
+}
+
 /// То же, что core.pst_reader.verify(): полная проверка файла, сводка {папка: писем}.
 #[pyfunction]
 fn verify<'py>(py: Python<'py>, path: PathBuf) -> PyResult<Bound<'py, PyDict>> {
@@ -382,6 +419,7 @@ fn shinra_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PstFile>()?;
     m.add_function(wrap_pyfunction!(pst_crc, m)?)?;
     m.add_function(wrap_pyfunction!(eml_to_message, m)?)?;
+    m.add_function(wrap_pyfunction!(summarize, m)?)?;
     m.add_function(wrap_pyfunction!(set_translator, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

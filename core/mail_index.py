@@ -1,9 +1,10 @@
 """Индекс писем архива для просмотрщика (кэшируется в index.json каждой папки)."""
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import msgfile
+from . import mailparse, msgfile
 from .mailparse import summarize
 from .storage import MailboxArchive
 from .i18n import tr
@@ -65,34 +66,23 @@ def load_folder(fdir: Path, folder_display: str, stop=None) -> list[dict]:
     cache = {}
     try:
         data = json.loads(idx_path.read_text(encoding="utf-8"))
-        if data.get("v") == INDEX_VERSION:
+        if data.get("v") == INDEX_VERSION:     # индекс другой версии строится заново
             cache = data.get("items", {})
-        elif data.get("v") == 3:          # индекс прошлой версии: файлы были только .eml
-            cache = data.get("items", {})
-            for it in cache.values():
-                it.setdefault("fsize", it.get("size"))
     except Exception:
         pass
-    rows, items, changed = [], {}, False
-    for p in msgfile.list_messages(fdir):
-        if stop is not None and stop():
-            return []
-        try:
-            st = p.stat()
-            c = cache.get(p.name)
-            if c and c.get("fsize") == st.st_size and c.get("mtime") == int(st.st_mtime):
-                row = c
-            else:
-                row = summarize(p, st)
-                changed = True
-        except Exception as e:
-            row = {"file": p.name, "from": "", "from_name": "", "from_addr": "", "to": "",
-                   "cc": "", "subject": tr('<не удалось прочитать: {e}>').format(e=e), "msgid": "",
-                   "sent": None, "received": 0, "size": 0, "fsize": -1, "mtime": 0,
-                   "attach": 0,
-                   "att_names": []}
-        items[p.name] = row
-        rows.append(dict(row, folder=folder_display, path=str(p)))
+    files = msgfile.scan_messages(fdir)
+    todo = [(Path(path), st) for name, path, st in files
+            if not ((c := cache.get(name)) and c.get("fsize") == st.st_size
+                    and c.get("mtime") == int(st.st_mtime))]
+    fresh = _summarize_all(todo, stop)
+    if fresh is None:
+        return []
+    changed = bool(todo)
+    rows, items = [], {}
+    for name, path, _st in files:
+        row = fresh.get(name) or cache[name]
+        items[name] = row
+        rows.append(dict(row, folder=folder_display, path=path))
     if changed or len(items) != len(cache):
         try:
             tmp = idx_path.with_suffix(".tmp")
@@ -104,6 +94,37 @@ def load_folder(fdir: Path, folder_display: str, stop=None) -> list[dict]:
     return rows
 
 
+def _summary_or_error(p: Path, st) -> dict:
+    try:
+        return summarize(p, st)
+    except Exception as e:
+        return {"file": p.name, "from": "", "from_name": "", "from_addr": "", "to": "",
+                "cc": "", "subject": tr('<не удалось прочитать: {e}>').format(e=e), "msgid": "",
+                "sent": None, "received": 0, "size": 0, "fsize": -1, "mtime": 0,
+                "attach": 0, "att_names": []}
+
+
+def _summarize_all(todo, stop) -> dict | None:
+    """{имя файла: сведения} для новых и изменённых писем; None — если остановили.
+    С нативным ядром — в несколько потоков (разбор идёт без GIL)."""
+    out = {}
+    if not mailparse.NATIVE or len(todo) < 64:
+        for p, st in todo:
+            if stop is not None and stop():
+                return None
+            out[p.name] = _summary_or_error(p, st)
+        return out
+    with ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 2)) as ex:
+        futures = [(p.name, ex.submit(_summary_or_error, p, st)) for p, st in todo]
+        for name, f in futures:
+            if stop is not None and stop():
+                for _n, g in futures:
+                    g.cancel()
+                return None
+            out[name] = f.result()
+    return out
+
+
 def rename_in_index(fdir: Path, changes: dict):
     """changes: {старое имя: (новое имя, новый размер файла)} — после сжатия писем,
     чтобы не разбирать их заново."""
@@ -112,7 +133,7 @@ def rename_in_index(fdir: Path, changes: dict):
         data = json.loads(idx_path.read_text(encoding="utf-8"))
     except Exception:
         return
-    if data.get("v") not in (3, INDEX_VERSION):
+    if data.get("v") != INDEX_VERSION:
         return
     items = data.get("items", {})
     for old, (new, fsize) in changes.items():
