@@ -10,9 +10,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QLibraryInfo, QLocale, QObject, Qt, QTranslator, Signal
-from PySide6.QtGui import QAction, QColor, QCursor
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFileDialog, QHBoxLayout,
+from PySide6.QtCore import QLibraryInfo, QLocale, QObject, Qt, QTimer, QTranslator, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QIcon
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
                                QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QSpinBox, QSplitter,
                                QStyle, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QFile
 from core.downloader import Downloader
 from core.models import APP_NAME, Config, app_data_dir
 from core.storage import MailboxArchive
+from core.winpower import IS_WIN, keeper
 from gui.account_dialog import AccountDialog
 from gui import theme
 from gui.common import progress_text, run_bg, set_progress
@@ -224,6 +225,14 @@ class MainWindow(QMainWindow):
         wl.addWidget(split)
         lay.addWidget(w, 1)
         self.setCentralWidget(central)
+
+        self.chk_awake = QCheckBox(tr('Не давать Windows уходить в сон во время выкачки и экспорта'))
+        self.chk_awake.setToolTip(tr('Пока идёт загрузка или экспорт, компьютер не уснёт от бездействия. Монитор гаснуть может. Закрытие крышки ноутбука и «Спящий режим» из меню «Пуск» по-прежнему усыпляют компьютер.'))
+        self.chk_awake.setChecked(self.cfg.keep_awake)
+        self.chk_awake.toggled.connect(self._keep_awake_changed)
+        self.chk_awake.setVisible(IS_WIN)
+        self.statusBar().addPermanentWidget(self.chk_awake)
+        keeper.set_keep_awake(self.cfg.keep_awake)
         self._update_statusbar()
 
     def _update_statusbar(self):
@@ -462,6 +471,14 @@ class MainWindow(QMainWindow):
         self.cfg.save()
         self._refresh_table()
 
+    def _keep_awake_changed(self, on):
+        self.cfg.keep_awake = on
+        keeper.set_keep_awake(on)
+        try:
+            self.cfg.save()
+        except Exception:
+            pass
+
     def _parallel_changed(self, v):
         self.cfg.parallel = v
         self.cfg.save()
@@ -654,6 +671,7 @@ class MainWindow(QMainWindow):
                     self.cfg.save()
             stop = threading.Event()
             self.running[a.id] = stop
+            keeper.hold(("download", a.id))
             st = self.state[a.id] = new_state()
             st.update(status=tr('В очереди'), kind="running")
             self._update_row(a.id)
@@ -757,6 +775,7 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, acc_id, kind, msg):
         self.running.pop(acc_id, None)
+        keeper.release(("download", acc_id))
         if acc_id in self.state:
             self.state[acc_id].update(status=msg, kind=kind)
             self._update_row(acc_id)
@@ -836,9 +855,24 @@ class MainWindow(QMainWindow):
         e.accept()
 
 
+def _resource(*parts) -> Path:
+    """Файл рядом с программой: в собранном exe — в папке _internal."""
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent), *parts)
+
+
 def main():
+    if IS_WIN:      # своя кнопка и значок в панели задач, даже при запуске через python.exe
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("KDshnik1.ShinraTensei")
+        except Exception:
+            pass
+    smoke = "--smoke-test" in sys.argv      # проверка собранного exe в CI: окно открылось и закрылось
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    icon = _resource("assets", "shinra.ico")
+    if icon.exists():
+        app.setWindowIcon(QIcon(str(icon)))
     QLocale.setDefault(QLocale(QLocale.Language.Russian if i18n.LANG == "ru"
                                else QLocale.Language.English))
     if i18n.LANG == "ru":                       # русские стандартные кнопки Qt («Да», «Нет»…)
@@ -851,7 +885,27 @@ def main():
     theme.apply(app, cfg.theme)        # тема до создания окон
     w = MainWindow()
     w.show()
+    if smoke:
+        sys.exit(_smoke_test(app, w))
     sys.exit(app.exec())
+
+
+def _smoke_test(app, w) -> int:
+    """Код выхода 0, если в сборке есть всё нужное: ядро, переводы Qt, значок."""
+    from core import pst_writer
+    problems = []
+    if not pst_writer.NATIVE:
+        problems.append("native core not loaded")
+    if not QTranslator().load("qtbase_ru", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        problems.append("qtbase_ru.qm missing")
+    if app.windowIcon().isNull():
+        problems.append("window icon missing")
+    QTimer.singleShot(500, w.close)
+    rc = app.exec()
+    report = "; ".join(problems) or "ok"
+    if os.environ.get("SHINRA_SMOKE_LOG"):         # у exe без консоли нет stderr
+        Path(os.environ["SHINRA_SMOKE_LOG"]).write_text(report + "\n", encoding="utf-8")
+    return 3 if problems else rc
 
 
 if __name__ == "__main__":

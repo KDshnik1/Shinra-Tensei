@@ -825,4 +825,8 @@ EN = {
         'could not parse the message (internal error)',
     'внутренняя ошибка при записи письма':
         'internal error while writing the message',
+    'Не давать Windows уходить в сон во время выкачки и экспорта':
+        "Don't let Windows sleep during download and export",
+    'Пока идёт загрузка или экспорт, компьютер не уснёт от бездействия. Монитор гаснуть может. Закрытие крышки ноутбука и «Спящий режим» из меню «Пуск» по-прежнему усыпляют компьютер.':
+        'While a download or export runs, the computer will not go to sleep when idle. The screen may still turn off. Closing a laptop lid or choosing Sleep in the Start menu still puts it to sleep.',
 }

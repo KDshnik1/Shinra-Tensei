@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, 
 from core.pst_export import (MAX_SPLIT_GB, MIN_SPLIT_GB, check_password, collect_tasks,
                              export_mailbox)
 from core.storage import MailboxArchive, safe_name
+from core.winpower import keeper
 from .common import fmt_num, set_progress
 from core.i18n import dec, tr
 
@@ -259,6 +260,7 @@ class ExportDialog(QDialog):
         self.stop.clear()
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        keeper.hold(("export", id(self)))
         set_progress(self.pb, 0, 0, tr('Экспортировано писем: '))
         set_progress(self.pb_total, 0, 0, tr('Всего: '))
         self.thread = threading.Thread(target=self._worker,
@@ -324,6 +326,7 @@ class ExportDialog(QDialog):
         b.done.emit(results)
 
     def _finished(self, results):
+        keeper.release(("export", id(self)))
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.sp_split.setEnabled(True)

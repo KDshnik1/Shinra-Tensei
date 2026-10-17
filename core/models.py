@@ -141,6 +141,7 @@ class Config:
         self.language = i18n.LANG      # ru | en (применяется после перезапуска)
         self.split_gb = 10.0           # размер одной части PST, ГБ
         self.export_skip_duplicates = True   # не экспортировать повторы писем
+        self.keep_awake = True         # не давать Windows уходить в сон во время работы
 
     def load(self):
         if not self.path.exists():
@@ -161,6 +162,7 @@ class Config:
             pass
         self.export_skip_duplicates = bool(data.get("export_skip_duplicates",
                                                     self.export_skip_duplicates))
+        self.keep_awake = bool(data.get("keep_awake", self.keep_awake))
         known = {f.name for f in fields(Account)}
         for raw in data.get("accounts", []):
             enc = raw.pop("password_enc", "")
@@ -185,6 +187,7 @@ class Config:
             "language": self.language,
             "split_gb": self.split_gb,
             "export_skip_duplicates": self.export_skip_duplicates,
+            "keep_awake": self.keep_awake,
             "accounts": accs,
         }
         tmp = self.path.with_suffix(".tmp")

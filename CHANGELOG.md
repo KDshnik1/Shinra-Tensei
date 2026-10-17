@@ -7,6 +7,32 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.16.0] — 2026-10-17
+
+### Added
+- **"Don't let Windows sleep during download and export"** checkbox in the status bar of the main
+  window (on by default). While a download or a PST export runs, the computer does not go to sleep
+  when idle; the screen may still turn off. Closing a laptop lid or choosing Sleep in the Start menu
+  still puts it to sleep. The request shows up in `powercfg /requests` as "Shinra Tensei" and is
+  removed as soon as the last task ends.
+- App icon and file version: the exe has its own icon in Explorer and the taskbar, and
+  Properties → Details shows the version.
+
+### Changed
+- **The app is now a folder instead of a single exe**, and starts several seconds faster. The single
+  exe unpacked Python and Qt to `%TEMP%` on every start and the antivirus scanned every DLL again.
+  Releases are now `Shinra-Tensei-<version>-win64.zip`: unzip the folder and run
+  `Shinra Tensei.exe`. Settings and archives are not affected.
+- While a download or an export runs, Windows 11 no longer slows the app down (EcoQoS) when its
+  window is minimized. When nothing runs, Windows decides as usual.
+- The build is smaller: parts of Qt the app does not use are left out (software OpenGL, the
+  on-screen keyboard with Qt Quick and QML, Qt networking, PDF and rare image formats, Qt
+  translations other than Russian and English). Build settings moved to `shinra.spec`.
+- The exe is no longer packed with UPX, which often caused false antivirus alarms, and its Python
+  code is compiled with `optimize=2`.
+- CI starts the built exe with `--smoke-test` and fails if the window does not open, the native core
+  or the Qt translation is missing, or the icon is not found.
+
 ## [0.15.0] — 2026-10-17
 
 ### Added

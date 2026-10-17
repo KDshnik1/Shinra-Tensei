@@ -155,7 +155,8 @@ class Heap:
         return 66 if i >= 8 and (i - 8) % 128 == 0 else 2
 
     def alloc(self, data: bytes) -> int:
-        assert len(data) <= HEAP_MAX
+        if len(data) > HEAP_MAX:          # не assert: сборка exe идёт с optimize=2
+            raise ValueError(f"heap item too large: {len(data)}")
         i = len(self.pages) - 1
         page = self.pages[i]
         used = self._hdr(i) + sum(len(a) for a in page) + len(data) + 1 + 4 + 2 * (len(page) + 2)
