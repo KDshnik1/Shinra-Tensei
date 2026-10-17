@@ -1178,6 +1178,11 @@ fn header_received(hh: &Headers) -> Option<i64> {
         .or_else(|| hh.get("Date").and_then(hdr_ts))
 }
 
+/// mailparse.received_from_bytes: дата получения письма в памяти (по заголовкам).
+pub fn received_from_bytes(data: &[u8]) -> Option<i64> {
+    header_received(&header_only(&read_head(data)))
+}
+
 /// mailparse.summarize: краткие сведения о письме для списка в просмотрщике.
 pub struct Summary {
     pub from: String,

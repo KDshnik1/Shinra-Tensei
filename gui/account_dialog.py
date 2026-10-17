@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDateEdit, QD
                                QScrollArea, QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from core.downloader import MAX_CONNECTIONS
-from core.imap_client import ImapConnection
+from core.imap_client import server_folders
 from core.models import SECURITY_OPTIONS, Account
 from core.storage import safe_name
 from . import theme
@@ -430,11 +430,7 @@ class AccountDialog(QDialog):
             return self._result(False, err)
 
         def job():
-            c = ImapConnection(a)
-            c.connect()
-            n = len(c.list_folders())
-            c.logout()
-            return n
+            return len(server_folders(a))
         self._busy(True, tr('Подключение…'))
         run_bg(job, lambda n: self._result(True, tr('Подключение успешно. Папок на сервере: {n}.').format(n=n)),
                lambda e: self._result(False, e))
@@ -446,11 +442,7 @@ class AccountDialog(QDialog):
             return self._result(False, err)
 
         def job():
-            c = ImapConnection(a)
-            c.connect()
-            folders = c.list_folders()
-            c.logout()
-            return folders
+            return server_folders(a)
 
         def done(folders):
             current = self.cb_folder.currentData()

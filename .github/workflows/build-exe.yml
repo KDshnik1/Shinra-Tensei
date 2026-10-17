@@ -19,7 +19,7 @@ jobs:
       # native core (Rust); the windows-latest image already has Rust installed
       - run: rustc --version
       - run: pip install ./native
-      - run: python -c "import core.pst_writer as w; assert w.NATIVE, 'native core not loaded'"
+      - run: python -c "import core.pst_writer as w, core.downloader as d; assert w.NATIVE and d.NATIVE, 'native core not loaded'"
       - name: Tests (native core)
         run: python -m unittest discover -s tests -t . -v
       - name: Tests (pure Python)

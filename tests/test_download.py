@@ -6,6 +6,9 @@ import time
 import unittest
 from pathlib import Path
 
+from unittest import mock
+
+from core import downloader
 from core.downloader import Downloader
 from core.models import Account
 from tests.fake_imap import FakeImapServer, UIDVALIDITY
@@ -47,12 +50,14 @@ class DownloadTest(unittest.TestCase):
 
     CONNECTIONS = 1
 
-    def run_dl(self, folders, duplicates="never", connections=None, **opt):
+    def run_dl(self, folders, duplicates="never", connections=None, account=None, **opt):
         srv = FakeImapServer(folders, **opt)
         try:
             acc = Account(email="t@x", host="127.0.0.1", port=srv.port, security="none",
                           login="u", password="p", duplicates=duplicates,
                           connections=connections or self.CONNECTIONS)
+            for k, v in (account or {}).items():
+                setattr(acc, k, v)
             cb = CB()
             Downloader(acc, str(self.tmp), cb, threading.Event(), threading.Semaphore(1)).run()
             return cb, srv.state
@@ -206,6 +211,52 @@ class DownloadTest(unittest.TestCase):
         cb, _ = self.run_dl(f, duplicates="never")
         self.check_all(f)
         self.assertEqual(cb.c, (53, 0, 0))
+
+
+class ConnectTest(unittest.TestCase):
+    """Шифрование и вход: SSL/TLS, STARTTLS, самоподписанный сертификат, пароль не в ASCII."""
+    CONNECTIONS = 1
+    setUp, tearDown, run_dl = DownloadTest.setUp, DownloadTest.tearDown, DownloadTest.run_dl
+    saved, check_all, folders = DownloadTest.saved, DownloadTest.check_all, DownloadTest.folders
+
+    def test_ssl(self):
+        f = self.folders(30)
+        cb, _ = self.run_dl(f, tls="ssl", account={"security": "ssl", "accept_all_certs": True})
+        self.assertEqual(cb.fin[0], "ok", cb.lines)
+        self.check_all(f)
+
+    def test_starttls(self):
+        f = self.folders(30)
+        cb, _ = self.run_dl(f, tls="starttls",
+                            account={"security": "starttls", "accept_all_certs": True})
+        self.assertEqual(cb.fin[0], "ok", cb.lines)
+        self.check_all(f)
+
+    def test_untrusted_certificate(self):
+        f = self.folders(5)
+        cb, _ = self.run_dl(f, tls="ssl", account={"security": "ssl"})
+        self.assertEqual(cb.fin[0], "error", cb.lines)
+        self.assertRegex(cb.fin[1].lower(), "сертификат|certificate")
+        self.assertEqual(self.saved("INBOX"), {})
+
+    def test_login(self):
+        f = self.folders(5)
+        _, st = self.run_dl(f, account={"login": 'us"er', "password": "p\\w"})
+        self.assertEqual(st.auth, [("LOGIN", '"us\\"er" "p\\\\w"')])
+        _, st = self.run_dl(f, account={"login": "user", "password": "пароль"})
+        self.assertEqual(st.auth, [("PLAIN", "\0user\0пароль".encode())])
+
+    @unittest.skipUnless(downloader.NATIVE, "без ядра на Rust")
+    def test_falls_back_to_python_when_tls_fails(self):
+        f = self.folders(10)
+        tls = {"result": "tls", "message": "peer is incompatible", "downloaded": 0,
+               "already": 0, "errors": 0}
+        with mock.patch.object(downloader._native, "download", return_value=tls) as native:
+            cb, _ = self.run_dl(f)
+        native.assert_called_once()
+        self.assertEqual(cb.fin[0], "ok", cb.lines)
+        self.check_all(f)
+        self.assertTrue(any("peer is incompatible" in line for line in cb.lines), cb.lines)
 
 
 class ParallelDownloadTest(DownloadTest):

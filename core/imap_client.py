@@ -248,7 +248,9 @@ class ImapConnection:
         pw = self.acc.password
         try:
             try:
-                self.M.login(user, pw)
+                # imaplib берёт пароль в кавычки, а логин — нет: с пробелом или кавычкой
+                # в логине команда ломалась
+                self.M.login(quote(user), pw)
             except UnicodeEncodeError:
                 # Пароль/логин не в ASCII — используем AUTHENTICATE PLAIN в UTF-8
                 self.M.authenticate("PLAIN", lambda _: f"\0{user}\0{pw}".encode("utf-8"))
@@ -346,3 +348,31 @@ class ImapConnection:
         if typ != "OK":
             raise ImapError(tr('Сервер отказал в выдаче письма: {data}').format(data=data))
         return parse_fetch_many(data)
+
+
+def server_params(account) -> dict:
+    """Параметры подключения для ядра на Rust."""
+    return {"host": account.host, "port": account.port, "security": account.security,
+            "accept_all_certs": account.accept_all_certs,
+            "user": account.login or account.email, "password": account.password}
+
+
+def server_folders(account) -> list[Folder]:
+    """Список папок сервера (окно ящика). Подключается ядро на Rust, а если оно не
+    договорилось с сервером о TLS (сервер знает лишь TLS 1.0/1.1) — Python-код."""
+    from . import mailparse
+    native = getattr(mailparse, "_native", None) if mailparse.NATIVE else None
+    if hasattr(native, "imap_list_folders"):
+        try:
+            return [Folder(raw=r, display=d, delimiter=dl, flags=list(fl))
+                    for r, d, dl, fl in native.imap_list_folders(server_params(account))]
+        except native.TlsError:
+            pass
+        except native.ImapError as e:
+            raise ImapError(str(e)) from None
+    c = ImapConnection(account)
+    c.connect()
+    try:
+        return c.list_folders()
+    finally:
+        c.logout()

@@ -5,6 +5,10 @@ Placeholders {name} / {0} must stay the same as in the key.
 """
 
 EN = {
+    'внутренняя ошибка загрузки':
+        'internal download error',
+    'Защищённое соединение не установлено ({e}), пробую запасной модуль загрузки':
+        'Secure connection failed ({e}); trying the fallback download module',
     'Повторы писем не ищутся: в ящике нет папки «Вся почта», письмо лежит только в одной папке':
         'Duplicates are not searched for: the mailbox has no "All Mail" folder, so each message is in one folder only',
     'Подготовка: {0} ({1} из {2})':

@@ -5,10 +5,16 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import date
 
-from .imap_client import ImapConnection, ImapError, is_connection_error
+from .imap_client import ImapConnection, ImapError, is_connection_error, server_params
 from . import mailparse, msgfile
 from .storage import MailboxArchive, is_all_mail
 from .i18n import num, tr
+
+# Загрузка на Rust (shinra_core.download): IMAP, подготовка, очередь, соединения и запись
+# писем — в нативном ядре, здесь только связь с программой. Без ядра, с SHINRA_PURE_PYTHON=1
+# или если ядро не договорилось с сервером о TLS (сервер знает лишь TLS 1.0/1.1) — Python-код.
+_native = getattr(mailparse, "_native", None) if mailparse.NATIVE else None
+NATIVE = hasattr(_native, "download")
 
 MAX_AUTO_RECONNECTS = 3
 BATCH_COUNT = 100              # писем в одной команде FETCH
@@ -37,6 +43,14 @@ class StopRequested(Exception):
     pass
 
 
+class NativeError(ImapError):
+    """Ошибка загрузки в ядре на Rust: «Тип: сообщение» -> текст ошибки и подробность."""
+
+    def __init__(self, detail: str):
+        self.detail = detail
+        super().__init__(detail.split(": ", 1)[-1])
+
+
 @dataclass
 class ErrorQuestion:
     """Вопрос пользователю «пропустить письмо?». Поток ждёт ответа на event."""
@@ -49,6 +63,30 @@ class ErrorQuestion:
     event: threading.Event = field(default_factory=threading.Event)
     answer: str = "skip"            # retry | skip | skip_all | stop
     cancelled: bool = False
+
+
+class _NativeHost:
+    """То, что ядро на Rust вызывает у программы (из своих потоков)."""
+
+    def __init__(self, dl):
+        self.dl = dl
+        cb = dl.cb
+        self.status, self.progress, self.log, self.counters = cb.status, cb.progress, cb.log, cb.counters
+
+    def ask(self, folder, uid, error, details):
+        return self.dl._ask(folder, uid, error, details)
+
+    def stopped(self):
+        return self.dl.stop.is_set()
+
+    def request_stop(self):
+        self.dl.stop.set()
+
+    def archive_keys(self):
+        try:
+            return [(m, z) for m, z in self.dl._archive_keys() if isinstance(z, int) and z >= 0]
+        except StopRequested:
+            return []
 
 
 def _d(s: str):
@@ -162,9 +200,8 @@ class Downloader:
         if done:
             self.cb.progress(*progress)
 
-    def _ask(self, folder, uid, exc, details) -> str:
-        q = ErrorQuestion(self.acc.id, self.acc.email, folder.display, uid,
-                          f"{type(exc).__name__}: {exc}", details)
+    def _ask(self, folder: str, uid, error: str, details: str) -> str:
+        q = ErrorQuestion(self.acc.id, self.acc.email, folder, uid, error, details)
         self.cb.ask(q)
         while not q.event.wait(0.3):
             if self.stop.is_set():
@@ -180,13 +217,17 @@ class Downloader:
             while not self.sem.acquire(timeout=0.3):
                 self._check_stop()
             acquired = True
-            self._run()
+            if not (NATIVE and self._run_native()):
+                self._run()
             if self.errors:
                 self.cb.finished("warn", tr('Завершено с ошибками: загружено {0}, пропущено из-за ошибок {1}').format(self.downloaded, self.errors))
             else:
                 self.cb.finished("ok", tr('Готово: загружено {0}, уже было в архиве {1}').format(self.downloaded, self.already))
         except StopRequested:
             self.cb.finished("stopped", tr('Остановлено пользователем'))
+        except NativeError as e:
+            self.cb.log(tr('Критическая ошибка:\n') + e.detail)
+            self.cb.finished("error", tr('Ошибка: {e}').format(e=e))
         except Exception as e:
             self.cb.log(tr('Критическая ошибка:\n') + traceback.format_exc())
             self.cb.finished("error", tr('Ошибка: {e}').format(e=e))
@@ -194,6 +235,28 @@ class Downloader:
             self.main.close()
             if acquired:
                 self.sem.release()
+
+    def _run_native(self) -> bool:
+        """Загрузка ядром на Rust. False — TLS не установлен, загрузку делает Python-код."""
+        a = self.acc
+        params = server_params(a) | {
+            "security_text": a.security_text(),
+            "date_mode": a.date_mode, "date_from": a.date_from, "date_to": a.date_to,
+            "folder_mode": a.folder_mode, "folder_raw": a.folder_raw,
+            "folder_display": a.folder_display, "connections": int(a.connections or 1),
+            "duplicates": getattr(a, "duplicates", "auto"), "compress": self.compress,
+            "mailbox_dir": str(self.archive.dir), "thousands": num(1000)[1],
+        }
+        r = _native.download(params, _NativeHost(self))
+        self.downloaded, self.already, self.errors = r["downloaded"], r["already"], r["errors"]
+        if r["result"] == "stop":
+            raise StopRequested()
+        if r["result"] == "tls":
+            self.cb.log(tr('Защищённое соединение не установлено ({e}), пробую запасной модуль загрузки').format(e=r["message"]))
+            return False
+        if r["result"] == "error":
+            raise NativeError(r["message"])
+        return True
 
     def _run(self):
         a = self.acc
@@ -547,7 +610,8 @@ class Downloader:
                 if self.skip_all:
                     answer = "skip"
                 else:
-                    answer = self._ask(folder, uid, e, traceback.format_exc())
+                    answer = self._ask(folder.display, uid, f"{type(e).__name__}: {e}",
+                                       traceback.format_exc())
                 if answer == "stop":
                     self.stop.set()            # «Остановить ящик» — для всех его соединений
                     raise StopRequested()
