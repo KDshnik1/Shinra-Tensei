@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from .imap_client import ImapConnection, ImapError, is_connection_error
-from . import msgfile
-from .storage import MailboxArchive
+from . import mailparse, msgfile
+from .storage import MailboxArchive, is_all_mail
 from .i18n import tr
 
 MAX_AUTO_RECONNECTS = 3
@@ -66,7 +66,8 @@ class Downloader:
         self.current_folder = None
         self.skip_all = False
         self.batches = True            # качать пачками, пока сервер не откажет
-        self.downloaded = self.already = self.errors = 0
+        self.downloaded = self.already = self.errors = self.duplicates = 0
+        self.known = set()             # (Message-ID, размер) писем, которые уже есть в архиве
 
     # ---------- служебное ----------
     def _check_stop(self):
@@ -187,7 +188,12 @@ class Downloader:
                 plan.append((f, uv, fdir, todo))
         self._counters()
 
-        # 2. Загрузка
+        # 2. Загрузка. «Вся почта» Gmail — последней: её письма почти все есть в других
+        # папках, и с пропуском повторов они остаются там, где лежат по ярлыкам.
+        plan.sort(key=lambda p: is_all_mail(p[0]))
+        if a.skip_duplicates and plan:
+            self.cb.status(tr('Поиск повторов в архиве'))
+            self.known = self._archive_keys()
         total = sum(len(p[3]) for p in plan)
         done = 0
         self.cb.progress(0, total)
@@ -214,21 +220,63 @@ class Downloader:
                 done += len(todo)
                 self.cb.progress(done, total)
                 continue
-            try:
-                sizes = self._with_reconnect(lambda: self.conn.fetch_sizes(todo))
-            except StopRequested:
-                raise
-            except Exception as e:
-                self.cb.log(tr('«{0}»: сервер не сообщил размеры писем ({e}), качаю небольшими пачками').format(f.display, e=e))
-                sizes = {}
+            meta, sizes = {}, None
+            if a.skip_duplicates:
+                try:
+                    meta = self._with_reconnect(lambda: self.conn.fetch_meta(todo))
+                    sizes = {u: m[0] for u, m in meta.items()}
+                except StopRequested:
+                    raise
+                except Exception as e:
+                    self.cb.log(tr('«{0}»: сервер не выдал Message-ID писем ({e}), повторы в этой папке не ищутся').format(f.display, e=e))
+            if sizes is None:
+                try:
+                    sizes = self._with_reconnect(lambda: self.conn.fetch_sizes(todo))
+                except StopRequested:
+                    raise
+                except Exception as e:
+                    self.cb.log(tr('«{0}»: сервер не сообщил размеры писем ({e}), качаю небольшими пачками').format(f.display, e=e))
+                    sizes = {}
+            if meta:
+                dups = [u for u in todo if self._key(meta.get(u)) in self.known]
+                if dups:
+                    skip = set(dups)
+                    todo = [u for u in todo if u not in skip]
+                    self.duplicates += len(dups)
+                    done += len(dups)
+                    self.cb.progress(done, total)
+                    self.cb.log(tr('«{0}»: {1} писем уже есть в других папках — не загружаются').format(f.display, len(dups)))
             for batch in make_batches(todo, sizes):
                 self._check_stop()
-                for _uid in self._download_batch(f, uv, fdir, batch):
+                for uid, saved in self._download_batch(f, uv, fdir, batch):
+                    if saved and (k := self._key(meta.get(uid))):
+                        self.known.add(k)
                     done += 1
                     self.cb.progress(done, total)
+        if self.duplicates:
+            self.cb.log(tr('Повторов писем не загружено: {0}').format(self.duplicates))
+
+    @staticmethod
+    def _key(m):
+        """(Message-ID, размер) — ключ повтора; у письма без Message-ID ключа нет."""
+        return (m[1], m[0]) if m and m[1] else None
+
+    def _archive_keys(self) -> set:
+        """Ключи писем, уже скачанных в архив ящика (по индексу просмотрщика)."""
+        from .mail_index import load_folders, mailbox_folders
+        try:
+            fs = mailbox_folders(self.archive.dir)
+            rows = load_folders([(f["dir"], f["display"]) for f in fs],
+                                stop=self.stop.is_set)
+        except Exception as e:
+            self.cb.log(tr('Не удалось прочитать архив для поиска повторов: {e}').format(e=e))
+            return set()
+        self._check_stop()
+        return {(mailparse.msgid_key(r.get("msgid")), r.get("size"))
+                for r in rows if mailparse.msgid_key(r.get("msgid"))}
 
     def _download_batch(self, folder, uv, fdir, batch):
-        """Качает пачку одной командой; после каждого письма отдаёт его UID. Письма, которые
+        """Качает пачку одной командой; после каждого письма отдаёт (UID, сохранено). Письма, которые
         не пришли в ответе или не сохранились, докачиваются по одному — с переподключением
         и вопросом пользователю, как раньше."""
         got = {}
@@ -255,8 +303,8 @@ class Downloader:
                 self.downloaded += 1
                 self._counters()
             else:
-                self._download_one(folder, uv, fdir, uid)
-            yield uid
+                saved = self._download_one(folder, uv, fdir, uid)
+            yield uid, saved
 
     def _download_one(self, folder, uv, fdir, uid):
         auto = 0
@@ -267,7 +315,7 @@ class Downloader:
                 self.archive.save_message(fdir, uv, uid, body, flags, idate, self.compress)
                 self.downloaded += 1
                 self._counters()
-                return
+                return True
             except StopRequested:
                 raise
             except Exception as e:
@@ -293,4 +341,4 @@ class Downloader:
                 self.errors += 1
                 self._counters()
                 self.cb.log(tr('Письмо UID {uid} в «{0}» пропущено: {e}').format(folder.display, uid=uid, e=e))
-                return
+                return False

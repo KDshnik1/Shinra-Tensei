@@ -103,6 +103,10 @@ class AccountDialog(QDialog):
         h.addWidget(self.btn_folders)
         v.addWidget(self.rb_all_folders)
         v.addLayout(h)
+        self.chk_dups = QCheckBox(tr('Не загружать повторы писем из других папок (например, «Вся почта» в Gmail)'))
+        self.chk_dups.setToolTip(tr('Письмо с тем же Message-ID и размером, что уже есть в архиве '
+                                    'ящика, второй раз не скачивается'))
+        v.addWidget(self.chk_dups)
         self.rb_one_folder.toggled.connect(self._sync_enabled)
         lay.addWidget(g)
 
@@ -169,6 +173,7 @@ class AccountDialog(QDialog):
         if a.folder_raw:
             self.cb_folder.addItem(a.folder_display or a.folder_raw, a.folder_raw)
         (self.rb_one_folder if a.folder_mode == "one" else self.rb_all_folders).setChecked(True)
+        self.chk_dups.setChecked(a.skip_duplicates)
         self.ed_arch.setText(a.archive_dir)
         (self.rb_arch_own if a.archive_dir else self.rb_arch_default).setChecked(True)
         self._sync_enabled()
@@ -238,6 +243,7 @@ class AccountDialog(QDialog):
         a.date_to = self.de_to.date().toString("yyyy-MM-dd")
         a.folder_mode = "one" if self.rb_one_folder.isChecked() else "all"
         a.folder_raw = self.cb_folder.currentData() or ""
+        a.skip_duplicates = self.chk_dups.isChecked()
         a.folder_display = self.cb_folder.currentText()
         a.archive_dir = self.ed_arch.text().strip() if self.rb_arch_own.isChecked() else ""
         return a

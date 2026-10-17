@@ -86,6 +86,7 @@ class Account:
     folder_mode: str = "all"           # all | one
     folder_raw: str = ""               # имя папки как на сервере (mUTF-7)
     folder_display: str = ""
+    skip_duplicates: bool = True       # не качать письмо, которое уже есть в другой папке
     archive_dir: str = ""              # своя папка для .eml; пусто — общая папка архива
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
@@ -138,6 +139,7 @@ class Config:
         self.theme = "system"          # system | light | dark
         self.language = i18n.LANG      # ru | en (применяется после перезапуска)
         self.split_gb = 10.0           # размер одной части PST, ГБ
+        self.export_skip_duplicates = True   # не экспортировать повторы писем
 
     def load(self):
         if not self.path.exists():
@@ -156,6 +158,8 @@ class Config:
             self.split_gb = float(data.get("split_gb", self.split_gb))
         except (TypeError, ValueError):
             pass
+        self.export_skip_duplicates = bool(data.get("export_skip_duplicates",
+                                                    self.export_skip_duplicates))
         known = {f.name for f in fields(Account)}
         for raw in data.get("accounts", []):
             enc = raw.pop("password_enc", "")
@@ -177,6 +181,7 @@ class Config:
             "theme": self.theme,
             "language": self.language,
             "split_gb": self.split_gb,
+            "export_skip_duplicates": self.export_skip_duplicates,
             "accounts": accs,
         }
         tmp = self.path.with_suffix(".tmp")

@@ -29,6 +29,19 @@ def safe_name(s: str, maxlen: int = 60) -> str:
     return out[:maxlen]
 
 
+# Папки, где лежат копии писем из других папок: в Gmail — «Вся почта» (флаг \All по RFC 6154).
+# Старые архивы флагов не хранят — тогда узнаём папку по имени.
+_ALL_MAIL_NAMES = {"[gmail]/all mail", "[google mail]/all mail", "[gmail]/вся почта",
+                   "[google mail]/вся почта"}
+
+
+def is_all_mail(info) -> bool:
+    """info — запись folders.json (или папка с .flags/.display)."""
+    flags = info.get("flags", []) if isinstance(info, dict) else getattr(info, "flags", [])
+    display = info.get("display", "") if isinstance(info, dict) else getattr(info, "display", "")
+    return "\\all" in [f.lower() for f in flags] or display.lower() in _ALL_MAIL_NAMES
+
+
 class MailboxArchive:
     META = "folders.json"
 
@@ -54,7 +67,8 @@ class MailboxArchive:
     def folder_dir(self, folder) -> Path:
         segs = folder.display.split(folder.delimiter) if folder.delimiter else [folder.display]
         rel = "/".join(safe_name(s) for s in segs if s) or "_"
-        info = {"display": folder.display, "delimiter": folder.delimiter, "raw": folder.raw}
+        info = {"display": folder.display, "delimiter": folder.delimiter, "raw": folder.raw,
+                "flags": list(folder.flags)}
         with self._lock:
             meta = self.load_meta()
             if meta.get(rel) != info:
