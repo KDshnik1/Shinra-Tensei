@@ -38,4 +38,13 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           python .github/release_notes.py "$env:TAG" notes.md
-          gh release create "$env:TAG" "dist/Shinra Tensei.exe#Shinra Tensei.exe" --title "Shinra Tensei $env:TAG" --notes-file notes.md --verify-tag
+          # the release may already exist (made on github.com together with the tag): then
+          # attach the exe and the notes to it instead of failing on "already exists"
+          gh release view "$env:TAG" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "$env:TAG" "dist/Shinra Tensei.exe#Shinra Tensei.exe" --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit "$env:TAG" --title "Shinra Tensei $env:TAG" --notes-file notes.md
+          } else {
+            gh release create "$env:TAG" "dist/Shinra Tensei.exe#Shinra Tensei.exe" --title "Shinra Tensei $env:TAG" --notes-file notes.md --verify-tag
+          }
