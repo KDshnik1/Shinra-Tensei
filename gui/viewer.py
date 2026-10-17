@@ -18,10 +18,15 @@ from core.mail_index import all_mailboxes, load_folders, load_texts, mailbox_fol
 from core.mailparse import head_text, parse_full, sent_datetime
 from . import icons, theme
 from .common import progress_text, run_bg
+from .fit import ColumnFitter
 from core.i18n import DATETIME_FMT, QT_DATE_FMT, tr
 
 COLS = ["", tr('От'), tr('Кому'), tr('Тема'), tr('Отправлено'), tr('Получено'), tr('Размер'), tr('Папка')]
 C_ATT, C_FROM, C_TO, C_SUBJ, C_SENT, C_RECV, C_SIZE, C_FOLDER = range(8)
+# (ключ для настроек, ширина, доля свободного места, мин. ширина); ширина 0 — фиксированная
+VIEW_COLUMNS = [("att", 0, 0, 0), ("from", 190, 2, 110), ("to", 170, 1, 90),
+                ("subject", 300, 5, 150), ("sent", 120, 0, 100), ("received", 120, 0, 100),
+                ("size", 75, 0, 60), ("folder", 120, 1, 70)]
 
 
 def human_size(n: int) -> str:
@@ -336,12 +341,10 @@ class ViewerWindow(QDialog):
         self.view.verticalHeader().setVisible(False)
         self.view.verticalHeader().setDefaultSectionSize(24)
         self.view.setWordWrap(False)
-        hh = self.view.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        hh.setSectionResizeMode(C_SUBJ, QHeaderView.ResizeMode.Stretch)
-        for c, w in {C_ATT: 40, C_FROM: 190, C_TO: 170, C_SENT: 120, C_RECV: 120,
-                     C_SIZE: 75, C_FOLDER: 120}.items():
-            self.view.setColumnWidth(c, w)
+        self.view.setColumnWidth(C_ATT, 40)
+        ui = getattr(self.cfg, "ui", {})          # ширины колонок сохраняются в настройках
+        self.columns = ColumnFitter(self.view, VIEW_COLUMNS, dict(ui.get("viewer_columns") or {}),
+                                    lambda saved: ui.__setitem__("viewer_columns", dict(saved)))
         self.view.selectionModel().currentRowChanged.connect(self._row_changed)
         self.view.doubleClicked.connect(self._open_external)
         tl.addWidget(self.view)
@@ -383,6 +386,9 @@ class ViewerWindow(QDialog):
         right.setSizes([420, 400])
         split.addWidget(right)
         split.setSizes([260, 1040])
+        split.setChildrenCollapsible(False)
+        right.setChildrenCollapsible(False)
+        self.tree.setMinimumWidth(170)
         lay.addWidget(split)
         self._show_message(None)
 

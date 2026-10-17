@@ -10,14 +10,13 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QLibraryInfo, QLocale, QObject, Qt, QTimer, QTranslator, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
+from PySide6.QtCore import QByteArray, QLibraryInfo, QLocale, QObject, Qt, QTimer, QTranslator, Signal
+from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QIcon
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu,
                                QMessageBox, QPlainTextEdit, QProgressBar, QSpinBox, QSplitter,
                                QStyle, QTableWidget, QTableWidgetItem, QTabWidget, QToolBar,
-                               QVBoxLayout,
-                               QWidget, QSizePolicy)
+                               QToolButton, QVBoxLayout, QWidget, QWidgetAction)
 
 from core.downloader import Downloader
 from core.models import APP_NAME, Config, app_data_dir
@@ -27,6 +26,7 @@ from gui.account_dialog import AccountDialog
 from gui import theme
 from gui.common import progress_text, run_bg, set_progress
 from gui.export_dialog import ExportDialog
+from gui.fit import ColumnFitter, ElidedLabel
 from gui.viewer import ViewerWindow
 from core import i18n
 from core.i18n import tr
@@ -35,6 +35,11 @@ COLS = ["", "E-mail", tr('Сервер'), tr('Период'), tr('Папки'), 
         tr('Загружено'), tr('Уже в архиве'), tr('Ошибки')]
 C_CHECK, C_EMAIL = 0, 1
 C_STATUS, C_PROGRESS, C_DL, C_ALREADY, C_ERR = 5, 6, 7, 8, 9
+# (ключ для настроек, ширина, доля свободного места, мин. ширина); ширина 0 — фиксированная
+MAIN_COLUMNS = [("check", 0, 0, 0), ("email", 200, 3, 120), ("server", 170, 2, 100),
+                ("period", 100, 0, 70), ("folders", 100, 1, 70), ("status", 240, 5, 140),
+                ("progress", 190, 1, 130), ("downloaded", 85, 0, 60), ("already", 95, 0, 60),
+                ("errors", 70, 0, 55)]
 
 
 class Bridge(QObject):
@@ -76,6 +81,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(tr('{APP_NAME} — архивация почты IMAP и экспорт в PST').format(APP_NAME=APP_NAME))
         self.resize(1250, 760)
+        self.setMinimumSize(760, 480)
         self.cfg = Config()
         self.cfg.load()
         self.state = {}
@@ -103,7 +109,11 @@ class MainWindow(QMainWindow):
         self._log_views = {}         # e-mail -> QPlainTextEdit вкладки журнала
         self._log_kind = {}          # e-mail -> итог (для цвета вкладки)
         self._filling = False
+        self._dirty_rows = set()     # ящики, чьи строки обновятся по таймеру
+        self._rows_timer = QTimer(self, singleShot=True, interval=150)
+        self._rows_timer.timeout.connect(self._flush_rows)
         self._build_ui()
+        self._restore_geometry()
         self._refresh_table()
         self._sync_actions()
         try:   # следим за сменой темы Windows, если выбрана «Системная»
@@ -123,8 +133,8 @@ class MainWindow(QMainWindow):
         bl = QVBoxLayout(banner)
         bl.setContentsMargins(18, 12, 18, 12)
         bl.addWidget(QLabel(APP_NAME, objectName="BannerTitle"))
-        bl.addWidget(QLabel(tr('Архивация почты: одновременная загрузка нескольких IMAP-ящиков и экспорт в Outlook PST'),
-                            objectName="BannerSub"))
+        bl.addWidget(ElidedLabel(tr('Архивация почты: одновременная загрузка нескольких IMAP-ящиков и экспорт в Outlook PST'),
+                                 objectName="BannerSub"))
         lay.addWidget(banner)
 
         tb = QToolBar()
@@ -161,29 +171,8 @@ class MainWindow(QMainWindow):
         self.a_open = act(tr('Открыть архив'), SP.SP_DirOpenIcon, self._open_archive)
         self.a_arch = act(tr('Папка архива…'), SP.SP_DriveHDIcon, self._choose_archive)
 
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        tb.addWidget(spacer)
-        tb.addWidget(QLabel(tr('Тема: ')))
-        self.cb_theme = QComboBox()
-        for text, val in theme.THEME_MODES:
-            self.cb_theme.addItem(text, val)
-        self.cb_theme.setCurrentIndex(max(self.cb_theme.findData(self.cfg.theme), 0))
-        self.cb_theme.currentIndexChanged.connect(self._theme_changed)
-        tb.addWidget(self.cb_theme)
         tb.addSeparator()
-        tb.addWidget(QLabel(" Язык / Language: "))
-        self.cb_lang = QComboBox()
-        for code, name in i18n.LANGUAGES:
-            self.cb_lang.addItem(name, code)
-        self.cb_lang.setCurrentIndex(max(self.cb_lang.findData(i18n.LANG), 0))
-        self.cb_lang.currentIndexChanged.connect(self._language_changed)
-        tb.addWidget(self.cb_lang)
-        tb.addSeparator()
-        tb.addWidget(QLabel(tr(' Одновременно ящиков: ')))
-        self.sp_parallel = QSpinBox(minimum=1, maximum=20, value=self.cfg.parallel)
-        self.sp_parallel.valueChanged.connect(self._parallel_changed)
-        tb.addWidget(self.sp_parallel)
+        self._build_settings_menu(tb)
 
         split = QSplitter(Qt.Orientation.Vertical)
         self.table = QTableWidget(0, len(COLS))
@@ -193,13 +182,9 @@ class MainWindow(QMainWindow):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setColumnWidth(C_CHECK, 34)
         hh = self.table.horizontalHeader()
-        hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        hh.setSectionResizeMode(C_STATUS, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(C_CHECK, QHeaderView.ResizeMode.Fixed)
-        for c, w in enumerate([34, 220, 190, 150, 130, 0, 210, 85, 95, 65]):
-            if w:
-                self.table.setColumnWidth(c, w)
         hdr = QTableWidgetItem("✔")
         hdr.setToolTip(tr('Отметить все ящики / снять все отметки'))
         self.table.setHorizontalHeaderItem(C_CHECK, hdr)
@@ -210,6 +195,10 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         split.addWidget(self.table)
+        self.columns = ColumnFitter(self.table, MAIN_COLUMNS, dict(self.cfg.ui.get("columns") or {}),
+                                    self._columns_changed)
+        hh.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        hh.customContextMenuRequested.connect(self._header_menu)
 
         self.log_tabs = QTabWidget()
         self.log_tabs.setDocumentMode(True)
@@ -219,6 +208,8 @@ class MainWindow(QMainWindow):
         self.log_tabs.setTabToolTip(0, tr('Журнал всех ящиков вместе'))
         split.addWidget(self.log_tabs)
         split.setSizes([450, 250])
+        split.setChildrenCollapsible(False)
+        self.split = split
         w = QWidget()
         wl = QVBoxLayout(w)
         wl.setContentsMargins(8, 8, 8, 8)
@@ -231,12 +222,83 @@ class MainWindow(QMainWindow):
         self.chk_awake.setChecked(self.cfg.keep_awake)
         self.chk_awake.toggled.connect(self._keep_awake_changed)
         self.chk_awake.setVisible(IS_WIN)
+        self.lbl_status = ElidedLabel()
+        self.statusBar().addWidget(self.lbl_status, 1)
         self.statusBar().addPermanentWidget(self.chk_awake)
         keeper.set_keep_awake(self.cfg.keep_awake)
         self._update_statusbar()
 
+    def _build_settings_menu(self, tb):
+        """Тема, язык и число одновременных ящиков — в меню кнопки «Настройки», чтобы
+        на узком окне они не обрезались вместе с кнопками панели."""
+        menu = QMenu(self)
+        m_theme = menu.addMenu(tr('Тема оформления'))
+        self.theme_group = QActionGroup(self)
+        for text, val in theme.THEME_MODES:
+            a = m_theme.addAction(text)
+            a.setCheckable(True)
+            a.setData(val)
+            a.setChecked(val == self.cfg.theme)
+            self.theme_group.addAction(a)
+        if self.theme_group.checkedAction() is None:
+            self.theme_group.actions()[0].setChecked(True)
+        self.theme_group.triggered.connect(self._theme_changed)
+        m_lang = menu.addMenu("Язык / Language")
+        self.lang_group = QActionGroup(self)
+        for code, name in i18n.LANGUAGES:
+            a = m_lang.addAction(name)
+            a.setCheckable(True)
+            a.setData(code)
+            a.setChecked(code == i18n.LANG)
+            self.lang_group.addAction(a)
+        self.lang_group.triggered.connect(self._language_changed)
+        menu.addSeparator()
+        box = QWidget()
+        bl = QHBoxLayout(box)
+        bl.setContentsMargins(24, 4, 12, 4)
+        bl.addWidget(QLabel(tr('Одновременно ящиков:')))
+        self.sp_parallel = QSpinBox(minimum=1, maximum=20, value=self.cfg.parallel)
+        self.sp_parallel.setToolTip(tr('Сколько ящиков выкачивать одновременно'))
+        self.sp_parallel.valueChanged.connect(self._parallel_changed)
+        bl.addWidget(self.sp_parallel)
+        wa = QWidgetAction(self)
+        wa.setDefaultWidget(box)
+        menu.addAction(wa)
+        menu.addSeparator()
+        menu.addAction(tr('Ширина колонок по умолчанию'), lambda: self.columns.reset())
+        self.a_settings = QAction(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView),
+                                  tr('Настройки'), self)
+        self.a_settings.setToolTip(tr('Тема, язык, число одновременно выкачиваемых ящиков'))
+        self.a_settings.setMenu(menu)
+        tb.addAction(self.a_settings)
+        btn = tb.widgetForAction(self.a_settings)
+        if btn is not None:
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+
+    def _header_menu(self, pos):
+        menu = QMenu(self)
+        menu.addAction(tr('Ширина колонок по умолчанию'), self.columns.reset)
+        menu.exec(self.table.horizontalHeader().mapToGlobal(pos))
+
+    def _columns_changed(self, saved):
+        self.cfg.ui["columns"] = dict(saved)
+
+    def _restore_geometry(self):
+        ui = self.cfg.ui
+        try:
+            if ui.get("geometry"):
+                self.restoreGeometry(QByteArray.fromBase64(ui["geometry"].encode("ascii")))
+            if ui.get("split"):
+                self.split.restoreState(QByteArray.fromBase64(ui["split"].encode("ascii")))
+        except Exception:
+            pass
+
+    def _save_geometry(self):
+        self.cfg.ui["geometry"] = bytes(self.saveGeometry().toBase64()).decode("ascii")
+        self.cfg.ui["split"] = bytes(self.split.saveState().toBase64()).decode("ascii")
+
     def _update_statusbar(self):
-        self.statusBar().showMessage(
+        self.lbl_status.setText(
             tr('Архив: {0}   |   Работает: {1}   |   Отмечено ящиков: {2}').format(self.cfg.archive_dir, len(self.running), len(self.checked)))
 
     # ================= таблица =================
@@ -483,8 +545,8 @@ class MainWindow(QMainWindow):
         self.cfg.parallel = v
         self.cfg.save()
 
-    def _language_changed(self):
-        code = self.cb_lang.currentData()
+    def _language_changed(self, action=None):
+        code = (action or self.lang_group.checkedAction()).data()
         self.cfg.language = code
         self.cfg.save()
         if code == i18n.LANG:
@@ -520,8 +582,8 @@ class MainWindow(QMainWindow):
             return
         self.close()
 
-    def _theme_changed(self):
-        self.cfg.theme = self.cb_theme.currentData()
+    def _theme_changed(self, action=None):
+        self.cfg.theme = (action or self.theme_group.checkedAction()).data()
         self.cfg.save()
         self.apply_theme()
 
@@ -758,17 +820,30 @@ class MainWindow(QMainWindow):
     def _on_status(self, acc_id, text):
         if acc_id in self.state:
             self.state[acc_id].update(status=text, kind="running")
-            self._update_row(acc_id)
+            self._row_later(acc_id)
 
     def _on_progress(self, acc_id, done, total):
         if acc_id in self.state:
             self.state[acc_id].update(done=done, total=total)
-            self._update_row(acc_id)
+            self._row_later(acc_id)
 
     def _on_counters(self, acc_id, dl, already, err):
         if acc_id in self.state:
             self.state[acc_id].update(downloaded=dl, already=already, errors=err)
-            self._update_row(acc_id)
+            self._row_later(acc_id)
+
+    def _row_later(self, acc_id):
+        """Прогресс приходит сотни раз в секунду: строка перерисовывается не чаще
+        раза в 150 мс, а не на каждый сигнал."""
+        self._dirty_rows.add(acc_id)
+        if not self._rows_timer.isActive():
+            self._rows_timer.start()
+
+    def _flush_rows(self):
+        rows, self._dirty_rows = self._dirty_rows, set()
+        for acc_id in rows:
+            if acc_id in self.state:
+                self._update_row(acc_id)
 
     def _on_log(self, acc_id, text):
         self._write_log(self._email(acc_id), text)
@@ -850,6 +925,7 @@ class MainWindow(QMainWindow):
                 time.sleep(0.05)
         for d in list(self._exports):
             d.close()
+        self._save_geometry()
         self.cfg.save()
         self._logfile.close()
         e.accept()
