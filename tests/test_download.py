@@ -47,11 +47,11 @@ class DownloadTest(unittest.TestCase):
 
     CONNECTIONS = 1
 
-    def run_dl(self, folders, skip_duplicates=False, connections=None, **opt):
+    def run_dl(self, folders, duplicates="never", connections=None, **opt):
         srv = FakeImapServer(folders, **opt)
         try:
             acc = Account(email="t@x", host="127.0.0.1", port=srv.port, security="none",
-                          login="u", password="p", skip_duplicates=skip_duplicates,
+                          login="u", password="p", duplicates=duplicates,
                           connections=connections or self.CONNECTIONS)
             cb = CB()
             Downloader(acc, str(self.tmp), cb, threading.Event(), threading.Semaphore(1)).run()
@@ -118,10 +118,10 @@ class DownloadTest(unittest.TestCase):
 
     def test_no_sizes(self):
         f = self.folders(120)
-        for dups in (False, True):
-            with self.subTest(skip_duplicates=dups):
+        for dups in ("never", "always"):
+            with self.subTest(duplicates=dups):
                 shutil.rmtree(self.tmp, ignore_errors=True)
-                cb, _ = self.run_dl(f, skip_duplicates=dups, no_size=True)
+                cb, _ = self.run_dl(f, duplicates=dups, no_size=True)
                 self.assertEqual(cb.fin[0], "ok", cb.lines)
                 self.check_all(f)
 
@@ -147,7 +147,7 @@ class DownloadTest(unittest.TestCase):
 
     def test_duplicates_skipped(self):
         f = self.gmail()
-        cb, _ = self.run_dl(f, skip_duplicates=True)
+        cb, _ = self.run_dl(f, duplicates="auto")
         self.assertEqual(cb.fin[0], "ok", cb.lines)
         self.assertEqual(self.saved("INBOX"), f["INBOX"]["messages"])
         self.assertEqual(self.saved("Work"), f["Work"]["messages"])
@@ -158,22 +158,52 @@ class DownloadTest(unittest.TestCase):
     def test_duplicates_against_existing_archive(self):
         f = self.gmail()
         only_inbox = {"INBOX": f["INBOX"]}
-        self.run_dl(only_inbox, skip_duplicates=True)
-        cb, _ = self.run_dl(f, skip_duplicates=True)
+        self.run_dl(only_inbox, duplicates="auto")
+        cb, _ = self.run_dl(f, duplicates="auto")
         self.assertEqual(sorted(self.saved("[Gmail]/All Mail")), [90, 91, 92])
         self.assertEqual(cb.c, (8, 20, 0))
 
     def test_duplicates_server_without_header_fetch(self):
         f = self.gmail()
-        cb, st = self.run_dl(f, skip_duplicates=True, no_msgid=True)
+        cb, st = self.run_dl(f, duplicates="auto", no_msgid=True)
         self.assertEqual(cb.fin[0], "ok", cb.lines)
         self.check_all(f)                                 # повторы не ищутся, но всё скачано
         self.assertLessEqual(st.fetch_cmds, 4)            # размеры есть — качается пачками
         self.assertTrue(any("Message-ID" in line for line in cb.lines))
 
+    def test_auto_skips_message_id_without_all_mail(self):
+        f = self.folders(30)
+        f["Sent"]["messages"][99] = f["INBOX"]["messages"][3]      # копия, но не Gmail
+        cb, st = self.run_dl(f, duplicates="auto")
+        self.check_all(f)                                 # «Автоматически»: повторы не ищутся
+        self.assertNotIn("meta", st.cmds)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        cb, st = self.run_dl(f, duplicates="always")
+        self.assertIn("meta", st.cmds)
+
+    def test_always_finds_duplicates_without_all_mail(self):
+        f = self.folders(30)
+        f["Sent"]["messages"][99] = f["INBOX"]["messages"][3]
+        cb, _ = self.run_dl(f, duplicates="always")
+        self.assertNotIn(99, self.saved("Sent"))
+        self.assertEqual(cb.c, (40, 0, 0))
+
+    def test_download_starts_during_preparation(self):
+        """Большая папка готовится частями, и письма начинают качаться сразу, а не после
+        подготовки всей папки."""
+        f = {"INBOX": {"messages": {u: make_msg(u) for u in range(1, 3501)}}}
+        cb, st = self.run_dl(f, duplicates="always")
+        self.check_all(f)
+        if self.CONNECTIONS > 1:
+            return          # порядок команд разных соединений не определён
+        prep = [i for i, c in enumerate(st.cmds) if c in ("meta", "size")]
+        runs = sum(1 for i in prep if i == 0 or st.cmds[i - 1] == "body")
+        self.assertEqual(runs, 4)                         # 3 500 писем — 4 части по 1 000
+        self.assertLess(st.cmds.index("body"), prep[-1])
+
     def test_duplicates_kept_when_disabled(self):
         f = self.gmail()
-        cb, _ = self.run_dl(f, skip_duplicates=False)
+        cb, _ = self.run_dl(f, duplicates="never")
         self.check_all(f)
         self.assertEqual(cb.c, (53, 0, 0))
 
@@ -242,7 +272,7 @@ class ParallelDownloadTest(DownloadTest):
         for conns in (1, 4):
             with self.subTest(connections=conns):
                 shutil.rmtree(self.tmp, ignore_errors=True)
-                cb, _ = self.run_dl(f, skip_duplicates=True, connections=conns)
+                cb, _ = self.run_dl(f, duplicates="auto", connections=conns)
                 self.assertEqual(cb.fin[0], "ok", cb.lines)
                 self.assertEqual(self.saved("INBOX"), f["INBOX"]["messages"])
                 self.assertEqual(self.saved("Work"), f["Work"]["messages"])

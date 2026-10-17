@@ -5,14 +5,66 @@ Placeholders {name} / {0} must stay the same as in the key.
 """
 
 EN = {
-    'Сколько соединений с сервером открывать при загрузке этого ящика. Несколько соединений качают письма одновременно — это быстрее, если сервер ограничивает скорость одного соединения. Многие серверы не дают открыть больше 5–15 соединений на ящик (Gmail — 15), а соединения всех запущенных ящиков складываются. Если сервер откажет, загрузка продолжится теми соединениями, что открылись.':
-        'How many connections to the server to open when downloading this mailbox. Several connections download messages at the same time, which is faster when the server limits the speed of one connection. Many servers allow no more than 5–15 connections per mailbox (Gmail allows 15), and the connections of all running mailboxes add up. If the server refuses, the download continues with the connections that did open.',
-    '1 — обычная загрузка; больше — быстрее на медленных серверах':
-        '1 — normal download; more — faster on slow servers',
-    'Соединений:':
-        'Connections:',
-    'Подготовка: {0}':
-        'Preparing: {0}',
+    'Повторы писем не ищутся: в ящике нет папки «Вся почта», письмо лежит только в одной папке':
+        'Duplicates are not searched for: the mailbox has no "All Mail" folder, so each message is in one folder only',
+    'Подготовка: {0} ({1} из {2})':
+        'Preparing: {0} ({1} of {2})',
+    '‹ Назад':
+        '‹ Back',
+    'Далее ›':
+        'Next ›',
+    'Как выкачивать почту':
+        'How to download mail',
+    'Соединения с сервером':
+        'Server connections',
+    'Одно соединение':
+        'One connection',
+    'Несколько соединений:':
+        'Several connections:',
+    'Повторы писем (одно письмо в нескольких папках)':
+        'Duplicates (one message in several folders)',
+    'Автоматически (рекомендуется)':
+        'Automatic (recommended)',
+    'Всегда искать повторы':
+        'Always look for duplicates',
+    'Не искать, качать всё как есть':
+        "Don't look, download everything as is",
+    'Письма запрашиваются по одному соединению, пачками.':
+        'Messages are requested in batches over a single connection.',
+    'Пачки писем раздаются нескольким соединениям и качаются одновременно.':
+        'Batches of messages are shared out between several connections and downloaded at the same time.',
+    'Повторы ищутся только в ящиках с папкой «Вся почта» (Gmail): там каждое письмо лежит ещё и во «Вся почта».':
+        'Duplicates are searched for only in mailboxes with an "All Mail" folder (Gmail), where every message is also in "All Mail".',
+    'Перед загрузкой у сервера запрашиваются Message-ID и размеры всех новых писем.':
+        'Before downloading, the Message-ID and size of every new message are requested from the server.',
+    'Работает с любым сервером и не упирается в его ограничения.':
+        'Works with any server and never hits its limits.',
+    'Бережно к серверу; несколько ящиков, запущенных сразу, не мешают друг другу.':
+        "Gentle on the server; several mailboxes running at once do not get in each other's way.",
+    'Медленнее на серверах, которые ограничивают скорость одного соединения (mail.ru, Яндекс, Exchange).':
+        'Slower on servers that limit the speed of one connection (mail.ru, Yandex, Exchange).',
+    'В несколько раз быстрее, если сервер ограничивает скорость одного соединения: в проверке 4 соединения скачали почту в 2,8 раза быстрее одного.':
+        'Several times faster when the server limits the speed of one connection: in testing, 4 connections downloaded mail 2.8 times faster than one.',
+    'Ускоряется и одна большая папка, а не только много папок.':
+        'Speeds up a single large folder too, not only many folders.',
+    'Серверы ограничивают число соединений на ящик (Gmail — 15, другие — часто 5–10), а соединения всех запущенных ящиков складываются. Лишние сервер отклонит — загрузка продолжится теми, что открылись.':
+        'Servers limit connections per mailbox (Gmail allows 15, others often 5–10), and the connections of all running mailboxes add up. The server refuses the extra ones and the download continues with those that opened.',
+    'Больше нагрузка на сервер и сеть; некоторые серверы при множестве подключений на время блокируют вход. Для начала разумно 3–4.':
+        'More load on the server and network; some servers temporarily block sign-in after many connections. 3–4 is a sensible start.',
+    'В Gmail письмо скачивается один раз и остаётся в папке по ярлыку — архив не раздувается вдвое.':
+        'In Gmail a message is downloaded once and kept in its label folder, so the archive does not double in size.',
+    'На остальных серверах подготовка быстрая: Message-ID писем не запрашиваются.':
+        'On other servers preparation is fast because Message-IDs are not requested.',
+    'Копии, которые вы сами разложили по папкам на обычном сервере, скачаются как есть.':
+        'Copies you placed in several folders yourself on an ordinary server are downloaded as they are.',
+    'Копия одного письма не скачивается второй раз ни на каком сервере.':
+        'A copy of a message is never downloaded twice, on any server.',
+    'Подготовка дольше: на mail.ru и Exchange на десятках тысяч писем это заметно.':
+        'Preparation takes longer, which is noticeable on mail.ru and Exchange with tens of thousands of messages.',
+    'Самая быстрая подготовка; архив точно повторяет папки сервера.':
+        'Fastest preparation; the archive mirrors the server folders exactly.',
+    'В Gmail большинство писем скачается дважды: в своей папке и во «Вся почта».':
+        'In Gmail most messages are downloaded twice: in their own folder and in "All Mail".',
     'Загрузка в {0} соединениях':
         'Downloading over {0} connections',
     'Соединение {0} не открылось ({e}) — работают остальные':
@@ -65,10 +117,6 @@ EN = {
         'Size from',
     ' МБ':
         ' MB',
-    'Не загружать повторы писем из других папок (например, «Вся почта» в Gmail)':
-        "Don't download duplicates of messages from other folders (such as “All Mail” in Gmail)",
-    'Письмо с тем же Message-ID и размером, что уже есть в архиве ящика, второй раз не скачивается':
-        'A message with the same Message-ID and size as one already in the mailbox archive is not downloaded again',
     'в тексте писем':
         'in message text',
     'Искать и в тексте писем. В первый раз папка индексируется, потом поиск быстрый':

@@ -86,7 +86,7 @@ class Account:
     folder_mode: str = "all"           # all | one
     folder_raw: str = ""               # имя папки как на сервере (mUTF-7)
     folder_display: str = ""
-    skip_duplicates: bool = True       # не качать письмо, которое уже есть в другой папке
+    duplicates: str = "auto"           # повторы писем из других папок: auto | always | never
     connections: int = 1               # соединений с сервером при загрузке этого ящика
     archive_dir: str = ""              # своя папка для .eml; пусто — общая папка архива
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -164,6 +164,8 @@ class Config:
         known = {f.name for f in fields(Account)}
         for raw in data.get("accounts", []):
             enc = raw.pop("password_enc", "")
+            if "duplicates" not in raw and raw.get("skip_duplicates") is False:
+                raw["duplicates"] = "never"        # настройка версий 0.13–0.14
             acc = Account(**{k: v for k, v in raw.items() if k in known})
             acc.password = unprotect(enc)
             self.accounts.append(acc)

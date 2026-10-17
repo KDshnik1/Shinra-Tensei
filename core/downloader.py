@@ -8,13 +8,14 @@ from datetime import date
 from .imap_client import ImapConnection, ImapError, is_connection_error
 from . import mailparse, msgfile
 from .storage import MailboxArchive, is_all_mail
-from .i18n import tr
+from .i18n import num, tr
 
 MAX_AUTO_RECONNECTS = 3
 BATCH_COUNT = 100              # писем в одной команде FETCH
 BATCH_BYTES = 16 * 1024 * 1024 # и не больше стольких байт (письма держатся в памяти)
 UNKNOWN_SIZE = 1024 * 1024     # размер, если сервер его не назвал
 MAX_CONNECTIONS = 10           # соединений на один ящик, не больше
+PREP_CHUNK = 1000              # писем в одном запросе размеров и Message-ID при подготовке
 
 
 def make_batches(uids, sizes):
@@ -134,6 +135,11 @@ class Downloader:
         self.downloaded = self.already = self.errors = self.duplicates = 0
         self.done = self.total = 0
         self.known = set()             # (Message-ID, размер) писем, которые уже есть или качаются
+        self.archive_known = set()     # то же — только из архива (до этого запуска)
+        self.dedup = False             # искать ли повторы в этом запуске
+        self.preparing = False
+        self._no_meta = set()          # папки, где сервер не выдал Message-ID / размеры
+        self._no_sizes = set()
         self._uv_logged = set()
 
     # ---------- служебное ----------
@@ -198,6 +204,13 @@ class Downloader:
         self.cb.log(tr('Вход выполнен'))
 
         folders = [f for f in m.conn.list_folders() if f.selectable]
+        # Повторы между папками бывают там, где письмо лежит в нескольких папках сразу —
+        # в Gmail («Вся почта» и ярлыки). «Автоматически» ищет их только в таких ящиках:
+        # на других серверах запрос Message-ID лишь замедляет подготовку.
+        mode = getattr(a, "duplicates", "auto")
+        self.dedup = mode == "always" or (mode == "auto" and any(map(is_all_mail, folders)))
+        if mode == "auto" and not self.dedup:
+            self.cb.log(tr('Повторы писем не ищутся: в ящике нет папки «Вся почта», письмо лежит только в одной папке'))
         if a.folder_mode == "one":
             folders = [f for f in folders if f.raw == a.folder_raw]
             if not folders:
@@ -229,71 +242,89 @@ class Downloader:
                 plan.append((f, uv, fdir, todo))
         self._counters()
 
-        # 2. Пачки писем. «Вся почта» Gmail — последней: её письма почти все есть в других
-        # папках, и с пропуском повторов они остаются там, где лежат по ярлыкам.
+        # 2. Подготовка и загрузка идут вместе: папка готовится частями (размеры и Message-ID
+        # писем), и пачки каждой части сразу уходят соединениям. «Вся почта» Gmail — последней:
+        # её письма почти все есть в других папках, и с пропуском повторов они остаются там,
+        # где лежат по ярлыкам.
         plan.sort(key=lambda p: is_all_mail(p[0]))
-        if a.skip_duplicates and plan:
+        if self.dedup and plan:
             self.cb.status(tr('Поиск повторов в архиве'))
-            self.known = self._archive_keys()
+            self.archive_known = self._archive_keys()
+            self.known = set(self.archive_known)
         self.total = sum(len(p[3]) for p in plan)
         self.cb.progress(0, self.total)
-        jobs = []
-        for f, uv, fdir, todo in plan:
-            self._check_stop()
-            self.cb.status(tr('Подготовка: {0}').format(f.display))
-            try:
-                cur_uv = m.open(f)
-            except StopRequested:
-                raise
-            except Exception as e:
-                self.cb.log(tr('Папка «{0}» пропущена: {e}').format(f.display, e=e))
-                self._add(errors=1, done=len(todo))
-                continue
-            if cur_uv != uv:
-                self.cb.log(tr('«{0}»: сервер сменил UIDVALIDITY, папка будет перекачана при следующем запуске').format(f.display))
-                self._add(done=len(todo))
-                continue
-            meta, sizes = self._meta_and_sizes(f, todo)
-            if meta:
-                dups = [u for u in todo if self._key(meta.get(u)) in self.known]
-                if dups:
-                    skip = set(dups)
-                    todo = [u for u in todo if u not in skip]
-                    self.duplicates += len(dups)
-                    self._add(done=len(dups))
-                    self.cb.log(tr('«{0}»: {1} писем уже есть в других папках — не загружаются').format(f.display, len(dups)))
-            last = bool(meta) and is_all_mail(f)
-            for batch in make_batches(todo, sizes):
-                jobs.append({"folder": f, "uv": uv, "fdir": fdir, "batch": batch, "meta": meta,
-                             "done": set(), "last": last})
-
-        # 3. Загрузка — одним или несколькими соединениями
-        if jobs:
-            self._download(jobs)
+        if plan:
+            self._download(plan)
         if self.duplicates:
             self.cb.log(tr('Повторов писем не загружено: {0}').format(self.duplicates))
 
+    def _prepare(self, plan, queue):
+        """Готовит папки частями по PREP_CHUNK писем и кладёт пачки в очередь. После каждой
+        части отдаёт управление (yield) — при одном соединении оно тут же качает эти пачки."""
+        m = self.main
+        for f, uv, fdir, todo in plan:
+            last = self.dedup and is_all_mail(f)
+            for i in range(0, len(todo), PREP_CHUNK):
+                self._check_stop()
+                part = todo[i:i + PREP_CHUNK]
+                self.cb.status(tr('Подготовка: {0} ({1} из {2})').format(
+                    f.display, num(min(i + PREP_CHUNK, len(todo))), num(len(todo))))
+                if m.folder is not f:
+                    try:
+                        cur_uv = m.open(f)
+                    except StopRequested:
+                        raise
+                    except Exception as e:
+                        self.cb.log(tr('Папка «{0}» пропущена: {e}').format(f.display, e=e))
+                        self._add(errors=1, done=len(todo) - i)
+                        break
+                    if cur_uv != uv:
+                        self.cb.log(tr('«{0}»: сервер сменил UIDVALIDITY, папка будет перекачана при следующем запуске').format(f.display))
+                        self._add(done=len(todo) - i)
+                        break
+                meta, sizes = self._meta_and_sizes(f, part)
+                if meta:
+                    # с архивом сверяемся здесь; повторы среди писем этого запуска ловит загрузка
+                    dups = [u for u in part if self._key(meta.get(u)) in self.archive_known]
+                    if dups:
+                        skip = set(dups)
+                        part = [u for u in part if u not in skip]
+                        with self.lock:
+                            self.duplicates += len(dups)
+                        self._add(done=len(dups))
+                        self.cb.log(tr('«{0}»: {1} писем уже есть в других папках — не загружаются').format(f.display, len(dups)))
+                jobs = [{"folder": f, "uv": uv, "fdir": fdir, "batch": b, "meta": meta,
+                         "done": set(), "last": last and bool(meta)}
+                        for b in make_batches(part, sizes)]
+                with self.cv:
+                    queue.extend(jobs)
+                    self.pending += sum(1 for j in jobs if not j["last"])
+                    self.cv.notify_all()
+                yield
+
     def _meta_and_sizes(self, f, todo):
-        """(Message-ID и размеры — для поиска повторов, размеры — для пачек)."""
+        """(Message-ID и размеры — для поиска повторов, размеры — для пачек). Если сервер
+        отказал, в этой папке больше не спрашиваем (и пишем в журнал один раз)."""
         m = self.main
         meta, sizes = {}, None
-        if self.acc.skip_duplicates:
+        if self.dedup and f.raw not in self._no_meta:
             try:
                 meta = m.with_reconnect(lambda: m.conn.fetch_meta(todo))
                 sizes = {u: x[0] for u, x in meta.items()}
             except StopRequested:
                 raise
             except Exception as e:
+                self._no_meta.add(f.raw)
                 self.cb.log(tr('«{0}»: сервер не выдал Message-ID писем ({e}), повторы в этой папке не ищутся').format(f.display, e=e))
-        if sizes is None:
+        if sizes is None and f.raw not in self._no_sizes:
             try:
                 sizes = m.with_reconnect(lambda: m.conn.fetch_sizes(todo))
             except StopRequested:
                 raise
             except Exception as e:
+                self._no_sizes.add(f.raw)
                 self.cb.log(tr('«{0}»: сервер не сообщил размеры писем ({e}), качаю небольшими пачками').format(f.display, e=e))
-                sizes = {}
-        return meta, sizes
+        return meta, sizes or {}
 
     @staticmethod
     def _key(m):
@@ -315,63 +346,91 @@ class Downloader:
                 for r in rows if mailparse.msgid_key(r.get("msgid"))}
 
     # ---------- раздача пачек соединениям ----------
-    def _download(self, jobs):
-        n = max(1, min(int(self.acc.connections or 1), MAX_CONNECTIONS, len(jobs)))
-        queue = deque(jobs)
-        self.pending = sum(1 for j in jobs if not j["last"])
-        conns = [self.main] + [_Conn(self, i) for i in range(2, n + 1)]
+    def _download(self, plan):
+        batches = -(-self.total // BATCH_COUNT)            # примерно, пачек не меньше
+        n = max(1, min(int(self.acc.connections or 1), MAX_CONNECTIONS, batches))
+        queue = deque()
+        self.pending = 0
+        self.preparing = True
         failures = []
         if n > 1:
             self.cb.log(tr('Загрузка в {0} соединениях').format(n))
 
-        def worker(c):
+        def worker(c, wait=True):
             try:
-                if c is not self.main:
-                    try:
-                        c.connect()
-                    except Exception as e:
-                        if not self.stop.is_set():
-                            self.cb.log(tr('Соединение {0} не открылось ({e}) — работают остальные').format(c.n, e=e))
-                        return
-                self._work(c, queue)
+                self._work(c, queue, wait)
             except StopRequested:
                 pass
             except Exception as e:
                 failures.append(e)
-                if c.n > 1 or n > 1:
+                if n > 1:
                     self.cb.log(tr('Соединение {0} закрыто из-за ошибки: {e}').format(c.n, e=e))
-            finally:
-                if c is not self.main:
-                    c.close()
+                return False
+            return True
 
-        if n == 1:
+        alive = [0]
+
+        def extra(c):
+            try:
+                try:
+                    c.connect()
+                except Exception as e:
+                    if not self.stop.is_set():
+                        self.cb.log(tr('Соединение {0} не открылось ({e}) — работают остальные').format(c.n, e=e))
+                    return
+                worker(c)
+            finally:
+                c.close()
+                with self.cv:
+                    alive[0] -= 1
+                    self.cv.notify_all()
+
+        threads = []
+        for i in range(2, n + 1):
+            t = threading.Thread(target=extra, args=(_Conn(self, i),), daemon=True,
+                                 name=f"dl-{self.acc.email}-{i}")
+            threads.append(t)
+        alive[0] = len(threads)
+        for t in threads:
+            t.start()
+        # первое соединение готовит папки; пока других нет (или все выбыли), оно же и качает
+        main_ok = True
+        try:
+            for _ in self._prepare(plan, queue):
+                with self.cv:
+                    drain = alive[0] == 0
+                if drain and main_ok:
+                    main_ok = worker(self.main, wait=False)
+        finally:
+            with self.cv:
+                self.preparing = False
+                self.cv.notify_all()
+            if self.stop.is_set():
+                for t in threads:
+                    t.join()
+        if main_ok:
             worker(self.main)
-        else:
-            threads = [threading.Thread(target=worker, args=(c,), daemon=True,
-                                        name=f"dl-{self.acc.email}-{c.n}") for c in conns]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
+        for t in threads:
+            t.join()
         self._check_stop()
         if queue:                       # пачки остались: все соединения выбыли с ошибкой
             raise failures[-1] if failures else ImapError(tr('Нет соединения с сервером'))
 
-    def _next_job(self, queue):
+    def _next_job(self, queue, wait=True):
         """Следующая пачка. Пачки «Вся почта» (при пропуске повторов) ждут, пока докачаются
-        обычные папки: письмо должно остаться в папке по ярлыку, а не во «Вся почта»."""
+        обычные папки: письмо должно остаться в папке по ярлыку, а не во «Вся почта».
+        wait=False — не ждать новых пачек (первое соединение, пока оно готовит папки)."""
         with self.cv:
             while True:
                 self._check_stop()
-                if not queue:
+                if queue and not (queue[0]["last"] and self.pending):
+                    return queue.popleft()
+                if not wait or not (queue or self.preparing):
                     return None
-                if queue[0]["last"] and self.pending:
-                    self.cv.wait(0.3)
-                    continue
-                return queue.popleft()
+                self.cv.wait(0.3)
 
-    def _work(self, c, queue):
-        while (job := self._next_job(queue)) is not None:
+    def _work(self, c, queue, wait=True):
+        while (job := self._next_job(queue, wait)) is not None:
             try:
                 self._run_job(c, job)
             except StopRequested:

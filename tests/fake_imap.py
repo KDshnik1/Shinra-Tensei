@@ -11,7 +11,8 @@ folders: {имя: {"flags": [...], "messages": {uid: bytes}}}. Режимы (opt
   no_msgid    — отвечать BAD на запрос заголовка Message-ID (размеры — как обычно)
   max_conns   — не больше стольких соединений одновременно, лишним — BYE
   bandwidth   — скорость выдачи писем одним соединением, байт/с (как у серверов с лимитом)
-state.max_active — сколько соединений было открыто одновременно (наибольшее).
+state.max_active — сколько соединений было открыто одновременно (наибольшее);
+state.cmds — порядок запросов писем: "size", "meta" (с Message-ID) или "body".
 """
 import socket
 import socketserver
@@ -124,6 +125,8 @@ class _Handler(socketserver.StreamRequestHandler):
         uids = _parse_set(sset, have)
         up = items.upper()
         if "BODY.PEEK[]" not in up:                     # размеры / Message-ID
+            with st.lock:
+                st.cmds.append("meta" if "MESSAGE-ID" in up else "size")
             if opt.get("no_size") or (opt.get("no_msgid") and "MESSAGE-ID" in up):
                 self.w(f"{tag} BAD not supported\r\n".encode())
                 return True
@@ -142,6 +145,7 @@ class _Handler(socketserver.StreamRequestHandler):
             return True
         with st.lock:
             st.fetch_cmds += 1
+            st.cmds.append("body")
         for u in uids:
             with st.lock:
                 drop = (opt.get("drop_after") is not None and not st.dropped
@@ -178,6 +182,7 @@ class _State:
         self.fetch_cmds = 0
         self.bodies_sent = 0
         self.active = self.max_active = 0
+        self.cmds = []
         self.lock = threading.Lock()
 
 
