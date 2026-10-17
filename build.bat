@@ -44,12 +44,13 @@ if errorlevel 1 (
 )
 
 echo Building exe...
-"%VPY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name "Shinra Tensei" --hidden-import win32timezone --hidden-import shinra_core app.py
+"%VPY%" -m PyInstaller --noconfirm --clean shinra.spec
 if errorlevel 1 goto :fail
 
-if not exist "dist\Shinra Tensei.exe" goto :fail
+if not exist "dist\Shinra Tensei\Shinra Tensei.exe" goto :fail
 echo.
-echo ===== DONE: %~dp0dist\Shinra Tensei.exe =====
+echo ===== DONE: %~dp0dist\Shinra Tensei\Shinra Tensei.exe =====
+echo Copy the whole "dist\Shinra Tensei" folder, not only the exe.
 pause
 exit /b 0
 
