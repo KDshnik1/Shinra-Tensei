@@ -7,6 +7,30 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.12.0] — 2026-10-17
+
+### Added
+- **Search in message text.** An "in message text" checkbox next to the search box also searches
+  the message itself (plain text, or HTML without markup). The first search indexes the folder
+  (21,000 messages take about 6 s with the native core, with progress in the status line); after
+  that the index opens in about 1 s. Texts are stored in `text_index.gz` in the message folder, and
+  only new and changed messages are parsed again.
+
+### Changed
+- **Mail is downloaded in batches.** Each message used to be requested with its own command and a
+  full round trip. Messages now come in batches of up to 100 messages or 16 MB; large ones still go
+  one at a time. On a test server with 30 ms of latency, 1,657 messages took 2.7 s instead of
+  113 s. Messages missing from a server response are downloaded one by one with the usual retries
+  and "skip?" prompt. A dropped connection re-requests the batch, and a server that does not accept
+  such requests is switched to one at a time automatically.
+- **PST export is 1.6× faster** (3,000 messages: 2.7–3.6 s → 1.6–2.3 s). The native core parses
+  messages on several threads and writes them in order. The PST contents are the same.
+- Opening a mailbox with many folders for the first time is faster: new messages of all folders
+  are summarized by one thread pool (60 folders: 0.71 s → 0.50 s). Selecting another folder before
+  a load finishes now stops the old load instead of slowing down the new one.
+- `native/check.py` now says that its Rust PST write time includes converting data from Python. The
+  export does not do that; there Rust writes about 5× faster than Python.
+
 ## [0.11.0] — 2026-10-17
 
 ### Changed
