@@ -9,13 +9,14 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtWidgets import (QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QGroupBox,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-                               QVBoxLayout)
+                               QSplitter, QVBoxLayout, QWidget)
 
 from core.pst_export import (MAX_SPLIT_GB, MIN_SPLIT_GB, check_password, collect_tasks,
                              export_mailbox)
 from core.storage import MailboxArchive, safe_name
 from core.winpower import keeper
 from .common import fmt_num, set_progress
+from .fit import FitScrollArea
 from core.i18n import dec, tr
 
 
@@ -59,9 +60,17 @@ class ExportDialog(QDialog):
         if log_sink:
             self.bridge.mailbox_log.connect(log_sink)
         self._build()
+        # высота — по содержимому, но не выше экрана (на маленьком экране появится прокрутка)
+        screen = self.screen().availableGeometry().height() if self.screen() else 900
+        self.resize(700, max(480, min(self.sizeHint().height(), screen - 60)))
 
     def _build(self):
-        lay = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        # настройки — в прокрутке: окно помещается и на экран высотой 768, а подсказки
+        # с переносом строк не налезают друг на друга на узком окне
+        content = QWidget()
+        lay = QVBoxLayout(content)
+        lay.setContentsMargins(0, 0, 0, 0)
         g = QGroupBox(tr('Почтовые ящики из архива'))
         v = QVBoxLayout(g)
         self.lst = QListWidget()
@@ -75,6 +84,9 @@ class ExportDialog(QDialog):
             if not has:
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             self.lst.addItem(it)
+        # список — по числу ящиков, а не пустой блок в полэкрана
+        rows = max(self.lst.count(), 2)
+        self.lst.setMaximumHeight(min(rows, 8) * max(self.lst.sizeHintForRow(0), 20) + 8)
         v.addWidget(self.lst)
         h = QHBoxLayout()
         b_all = QPushButton(tr('Отметить все'))
@@ -154,10 +166,26 @@ class ExportDialog(QDialog):
         self.pb_total.setTextVisible(True)
         set_progress(self.pb_total, 0, 0, tr('Всего: '))
         v.addWidget(self.pb_total)
-        lay.addWidget(g)
+        progress_group = g
 
+        lay.addStretch()
+        # сверху настройки, снизу ход экспорта и журнал: их видно всегда, даже когда
+        # настройки на маленьком экране пришлось прокручивать
+        bottom = QWidget()
+        bl = QVBoxLayout(bottom)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addWidget(progress_group)
         self.log = QPlainTextEdit(readOnly=True)
-        lay.addWidget(self.log, 1)
+        self.log.setMinimumHeight(60)
+        bl.addWidget(self.log, 1)
+        scroll = FitScrollArea(content)
+        split = QSplitter(Qt.Orientation.Vertical, childrenCollapsible=False)
+        split.addWidget(scroll)
+        split.addWidget(bottom)
+        split.setStretchFactor(0, 3)
+        split.setStretchFactor(1, 1)
+        split.setSizes([scroll.sizeHint().height(), progress_group.sizeHint().height() + 120])
+        outer.addWidget(split, 1)
 
         h = QHBoxLayout()
         self.btn_folder = QPushButton(tr('Открыть папку с PST'))
@@ -179,7 +207,7 @@ class ExportDialog(QDialog):
         self.btn_close.clicked.connect(self.close)
         for w in (self.btn_start, self.btn_stop, self.btn_close):
             h.addWidget(w)
-        lay.addLayout(h)
+        outer.addLayout(h)
 
     def _split_changed(self, v):
         gb = dec(f"{v:g}")

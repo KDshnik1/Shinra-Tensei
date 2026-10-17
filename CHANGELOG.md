@@ -7,6 +7,35 @@ Version numbers are informal; the project was started on 2026-10-15.
 
 ---
 
+## [0.17.0] — 2026-10-17
+
+### Fixed
+- **The main window no longer falls apart when it is resized.** Before, only the Status column
+  stretched: after making the window narrower, E-mail, Server, Period and Folders stayed squeezed to
+  stubs even when the window was maximized again, and Errors went off the right edge. Now the columns
+  share the width of the window (E-mail, Server and Status get most of the free space), never get
+  narrower than their header, and come back when the window is widened. Only when the window is
+  narrower than all the columns together does a horizontal scroll bar appear.
+- The theme, the language and "Mailboxes at once" were cut off on the right of the toolbar on
+  windows narrower than about 1,400 px. They moved to the new **Settings** button on the toolbar.
+  Toolbar buttons that do not fit go to the » menu at its right end (that button was invisible in
+  the themes before).
+- The export window: on a narrow window the hint lines under "Size of one PST part" overlapped the
+  other settings, and the window did not fit a 768 px tall screen. The settings now scroll, while
+  the export progress, log and buttons stay visible; the mailbox list is as tall as the number of
+  mailboxes.
+- The message viewer: the same column layout as the main window; the folder tree can no longer be
+  squeezed to nothing by the splitter.
+
+### Changed
+- The window size and position, the log height and the column widths you set with the mouse are
+  remembered between starts. Settings → "Default column widths" (or right-click on the table header)
+  resets the columns.
+- The subtitle and the status bar end with "…" when they do not fit; the full text is in the
+  tooltip. The main window cannot be made smaller than 760 × 480.
+- During a download the mailbox table is redrawn at most about 7 times a second instead of on every
+  progress signal, so the window stays responsive when several mailboxes download quickly.
+
 ## [0.16.0] — 2026-10-17
 
 ### Added
